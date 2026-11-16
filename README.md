@@ -43,6 +43,7 @@ Pinfold.exe topology
 Pinfold.exe run                      engine in a console, no tray
 Pinfold.exe autostart [on|off]       show or change starting with Windows
 Pinfold.exe quit                     stop the background instance
+Pinfold.exe benchmark <exe> [--profiles A,B] [--seconds 60] [--rounds 2]
 ```
 
 Dropping an `.exe` or a `.lnk` shortcut onto `Pinfold.exe` shows a profile picker
@@ -70,8 +71,55 @@ prompt at logon. Pinfold switches to the elevated instance right away.
 Set `"elevatedAutostart": false` in the config to use the plain
 `HKCU\...\Run` entry instead; Pinfold then runs unelevated.
 
-## Tests
+## Benchmark: which profile is faster for a game?
 
+Pinfold can measure it. With the game running:
+
+- tray menu > **Rules** > the game > **Benchmark profiles...**, or
+- `Pinfold.exe benchmark game.exe`
+
+It switches the game between the profiles (by default "Cache" and
+"Frequency"), captures the frame times in each with
+[PresentMon](https://github.com/GameTechDev/PresentMon/releases), and prints a
+comparison: average FPS, 1 % and 0.1 % lows, and frame-time percentiles (p50,
+p95, p99, p99.9), with the difference against the first profile. A sound marks
+the start, every switch and the end, so you can stay in the game. The rule is
+put back the way it was afterwards.
+
+```
+metric               Cache  Frequency  vs Cache
+-----------------------------------------------
+avg FPS             143.20     131.75     -8.0%
+1% low FPS           96.40      81.10    -15.9%
+frame time p99 ms    10.12      12.05    +19.1%
+```
+
+(illustrative numbers)
+
+Setup: download the PresentMon console application and put the `.exe` next to
+`Pinfold.exe`, or set `"presentMon": "C:\\path\\PresentMon.exe"` in the config,
+or pass `--presentmon <path>`. PresentMon needs administrator rights; started
+from the tray menu of an elevated Pinfold (see above) there is no extra prompt.
+
+Options: `--profiles "Cache,Frequency,All cores"`, `--seconds 60` per capture,
+`--rounds 2` (the order is reversed every second round so that neither profile
+always goes first), `--settle 5` seconds after each switch, `--countdown 10`
+before the start. Captures and the report are kept under
+`%AppData%\Pinfold\benchmarks`.
+
+For a result you can trust:
+
+- Keep the scene constant for the whole run (stand still, or loop the same
+  path). The profiles are switched while the game runs, so anything that
+  changes on screen changes the numbers too.
+- Make the game CPU-bound (lower resolution or settings); if the graphics
+  card is the limit, every profile looks the same.
+- Differences under about 2-3 % are noise. Use more rounds to be sure.
+- A game sizes its thread pools at start. To include that effect, compare
+  separate sessions instead: capture each with PresentMon yourself and run
+  `scripts\compare-frametimes.ps1 a.csv b.csv`.
+
+## Tests
 ```
 cargo test
 ```
@@ -87,7 +135,8 @@ together with `cargo fmt --check` and `cargo clippy -D warnings`):
   PID reuse, config reload, pause. No real process is touched.
 - **Integration tests** (`tests/`): run the real `Pinfold.exe` with
   `PINFOLD_DIR` pointing at a private directory. `cli.rs` covers the command
-  line; `pinning.rs` starts the engine and real target processes (copies of
+  line; `benchmark.rs` runs the benchmark with a stand-in for PresentMon;
+  `pinning.rs` starts the engine and real target processes (copies of
   the binary under unique names) and checks their actual affinity mask and
   CPU Sets through the Windows API.
 
@@ -99,11 +148,32 @@ needs a UAC prompt.
 
 ## Status
 
-First milestone. Implemented: topology, profiles, rules, polling, apply
-(affinity mask, CPU Sets, both), drift detection with back-off, logging,
-startup diagnostics, tray menu, command line.
+Implemented from the spec: topology and default profiles; rules by file name
+or full path; polling with apply by affinity mask, CPU Sets or both; drift
+detection with back-off; denied handling; config reload; logging and startup
+diagnostics; tray menu; adding programs by running process, drag and drop,
+file picker and command line, including `.lnk` shortcuts; elevated autostart.
+Beyond the spec: the benchmark.
 
-Not yet implemented from the spec:
+Measured against the resource budget (spec section 8), 10 minutes idle with
+5 rules and 2 matched processes, on a Ryzen 9 9950X3D
+(`scripts\measure.ps1`):
 
-- foreground window listed first in Assign (F14)
-- start-time check against PID reuse for unmatched processes (F6); matched processes are safe because their handle stays open
+| Item | Target | Measured |
+|---|---|---|
+| Private memory | under 5 MB | 2.6 MB |
+| CPU | under 0.1 % of one core | 0.018 % |
+| Executable size | under 2 MB | 0.4 MB |
+| Disk writes when nothing happens | none | none |
+| Threads | 1 worker plus tray loop | 3: the engine runs on the tray thread; the other two belong to Windows |
+
+Known limits:
+
+- A program that starts within the same poll interval in which another,
+  unmatched process with the same PID exited is not noticed until it is
+  restarted. Closing this gap needs process-start events (the optional ETW
+  step in the spec) or opening every process on every poll, which the
+  resource budget rules out. Matched and denied processes are not affected.
+- The tray menu and the dialogs are not covered by automated tests.
+- Not done: the interference experiment (spec M0) and the 30-minute game
+  session (A8); both need real games being played.
