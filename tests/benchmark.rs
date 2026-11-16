@@ -178,15 +178,15 @@ fn problems_are_explained_and_nothing_is_changed() {
 }
 
 #[test]
-fn capture_without_output_points_at_admin_rights_and_restores_the_rule() {
+fn presentmon_failure_is_reported_with_its_own_words_before_anything_is_changed() {
     let s = Sandbox::new();
     let target = s.target();
     write_config(
         &s,
         &format!(r#"{{ "match": "{}", "profile": "Wide", "enforce": false }}"#, target.name),
     );
-    // Like PresentMon without administrator rights: exits, writes nothing.
-    let pm = fake_presentmon(&s, "exit 5");
+    let pm =
+        fake_presentmon(&s, "[Console]::Error.WriteLine('error: no swap chain for you'); exit 5");
     let p = target.start();
     wait_for("target visible", TIMEOUT, || p.affinity() != 0);
 
@@ -195,7 +195,10 @@ fn capture_without_output_points_at_admin_rights_and_restores_the_rule() {
     let out = s.run(&args);
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     assert_eq!(out.status.code(), Some(1), "{text}");
-    assert!(text.contains("administrator rights"), "{text}");
+    assert!(text.contains("exit code 5") && text.contains("no swap chain for you"), "{text}");
+    // The trial capture fails before the countdown and before any switch.
+    assert!(!text.contains("round 1"), "{text}");
+    assert!(!s.log().contains("config reloaded"));
 
     let cfg: serde_json::Value = serde_json::from_str(&s.config()).unwrap();
     assert_eq!(cfg["rules"][0]["profile"], "Wide");

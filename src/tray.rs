@@ -597,6 +597,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 /// Background instance: tray icon plus engine. Returns the exit code.
 pub fn run() -> i32 {
     unsafe {
+        // Started by hand while the elevated logon task exists: hand over to
+        // the task, so Pinfold always runs with the rights it was set up
+        // with. (Not for instances with their own config directory, and not
+        // when the task could not run elevated anyway.)
+        if instance_key().is_empty()
+            && crate::diag::has_elevated_twin()
+            && autostart::task_exists()
+            && autostart::run_task()
+        {
+            return 0;
+        }
         if !acquire_single_instance() {
             message_box("Pinfold is already running. Look for its icon in the notification area.");
             return 0;

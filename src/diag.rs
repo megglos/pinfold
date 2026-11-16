@@ -87,6 +87,33 @@ impl Drop for Key {
     }
 }
 
+/// True for an unelevated process of an administrator: the account has a
+/// second, elevated token, so the logon task (highest privileges) would
+/// run elevated. False for a standard user and for an elevated process.
+pub fn has_elevated_twin() -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenElevationType, TOKEN_QUERY};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    const TOKEN_ELEVATION_TYPE_LIMITED: u32 = 3;
+    unsafe {
+        let mut token = null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            return false;
+        }
+        let mut kind = 0u32;
+        let mut len = 0u32;
+        let ok = GetTokenInformation(
+            token,
+            TokenElevationType,
+            &mut kind as *mut u32 as *mut _,
+            std::mem::size_of::<u32>() as u32,
+            &mut len,
+        );
+        CloseHandle(token);
+        ok != 0 && kind == TOKEN_ELEVATION_TYPE_LIMITED
+    }
+}
+
 pub fn is_elevated() -> bool {
     unsafe { IsUserAnAdmin() != 0 }
 }

@@ -38,6 +38,31 @@ pub struct Options {
     pub window: bool,
 }
 
+impl Options {
+    /// The command line that reproduces these options.
+    pub fn to_args(&self) -> Vec<String> {
+        let mut a = vec![self.target.clone()];
+        if !self.profiles.is_empty() {
+            a.extend(["--profiles".to_string(), self.profiles.join(",")]);
+        }
+        for (flag, value) in [
+            ("--seconds", self.seconds),
+            ("--rounds", self.rounds),
+            ("--settle", self.settle),
+            ("--countdown", self.countdown),
+        ] {
+            a.extend([flag.to_string(), value.to_string()]);
+        }
+        if let Some(p) = &self.presentmon {
+            a.extend(["--presentmon".to_string(), p.clone()]);
+        }
+        if self.window {
+            a.push("--window".to_string());
+        }
+        a
+    }
+}
+
 pub fn parse_args(args: &[String]) -> Result<Options, String> {
     let mut o = Options {
         target: String::new(),
@@ -233,41 +258,100 @@ impl Run<'_> {
             profile.chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).collect();
         let csv = self.out_dir.join(format!("round{round}-{safe}.csv"));
         let _ = std::fs::remove_file(&csv);
-        let mut child = Command::new(&self.presentmon)
-            .args(["--process_name", &self.opts.target])
-            .arg("--output_file")
-            .arg(&csv)
-            .args(["--timed", &self.opts.seconds.to_string()])
-            .args(["--terminate_after_timed", "--no_console_stats"])
-            .args(["--session_name", "PinfoldBenchmark", "--stop_existing_session"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("cannot start PresentMon ({}): {e}", self.presentmon.display()))?;
-        let deadline = Instant::now() + Duration::from_secs(self.opts.seconds as u64 + 30);
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) if Instant::now() > deadline => {
-                    let _ = child.kill();
-                    return Err("PresentMon did not finish in time".into());
-                }
-                Ok(None) => std::thread::sleep(Duration::from_millis(100)),
-                Err(e) => return Err(format!("waiting for PresentMon failed: {e}")),
-            }
-        };
-        let text = std::fs::read_to_string(&csv).map_err(|_| {
-            format!(
-                "PresentMon wrote no capture (exit code {:?}). It needs administrator rights: \
-                 run the benchmark from the tray menu of an elevated Pinfold, or from an \
-                 elevated console.",
-                status.code()
-            )
-        })?;
+        presentmon_capture(&self.presentmon, &self.opts.target, &csv, self.opts.seconds)
+            .map_err(|e| e.message())?;
+        let text = std::fs::read_to_string(&csv)
+            .map_err(|_| format!("PresentMon wrote no capture file ({})", csv.display()))?;
         frametime::parse_csv(&text).map_err(|e| {
             format!("{e} ({}). Was {} in front and rendering?", csv.display(), self.opts.target)
         })
+    }
+}
+
+/// Why a PresentMon run failed, with what PresentMon itself said.
+pub struct CaptureError {
+    code: Option<i32>,
+    output: String,
+}
+
+impl CaptureError {
+    /// PresentMon could not start its trace session for lack of rights.
+    pub fn is_access_denied(&self) -> bool {
+        self.output.to_lowercase().contains("access denied")
+    }
+
+    pub fn message(&self) -> String {
+        let said = self.output.trim();
+        let code = self.code.map(|c| c.to_string()).unwrap_or_else(|| "none".into());
+        if said.is_empty() {
+            format!("PresentMon failed (exit code {code}) without a message.")
+        } else {
+            format!("PresentMon failed (exit code {code}):\n{said}")
+        }
+    }
+}
+
+/// One timed PresentMon capture of all processes named `target` into `csv`.
+fn presentmon_capture(
+    presentmon: &Path,
+    target: &str,
+    csv: &Path,
+    seconds: u32,
+) -> Result<(), CaptureError> {
+    let fail = |code: Option<i32>, output: String| CaptureError { code, output };
+    // PresentMon reports problems on stderr; keep it for the error message.
+    let err_path = csv.with_extension("presentmon.txt");
+    let err_file = std::fs::File::create(&err_path).map_err(|e| fail(None, e.to_string()))?;
+    let mut child = Command::new(presentmon)
+        .args(["--process_name", target])
+        .arg("--output_file")
+        .arg(csv)
+        .args(["--timed", &seconds.to_string()])
+        .args(["--terminate_after_timed", "--no_console_stats"])
+        .args(["--session_name", "PinfoldBenchmark", "--stop_existing_session"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(err_file))
+        .spawn()
+        .map_err(|e| fail(None, format!("cannot start {}: {e}", presentmon.display())))?;
+    let deadline = Instant::now() + Duration::from_secs(seconds as u64 + 30);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() > deadline => {
+                let _ = child.kill();
+                return Err(fail(None, "PresentMon did not finish in time".into()));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(e) => return Err(fail(None, format!("waiting for PresentMon failed: {e}"))),
+        }
+    };
+    let output = std::fs::read_to_string(&err_path).unwrap_or_default();
+    if status.success() {
+        let _ = std::fs::remove_file(&err_path);
+        Ok(())
+    } else {
+        Err(fail(status.code(), output))
+    }
+}
+
+/// Why the benchmark did not produce a report.
+pub enum Failure {
+    /// PresentMon needs rights this process does not have; running the
+    /// benchmark elevated will help.
+    NeedsElevation,
+    Message(String),
+}
+
+impl From<String> for Failure {
+    fn from(s: String) -> Failure {
+        Failure::Message(s)
+    }
+}
+
+impl From<&str> for Failure {
+    fn from(s: &str) -> Failure {
+        Failure::Message(s.to_string())
     }
 }
 
@@ -297,7 +381,7 @@ fn restore(dir: &Path, target: &str, original: Option<Rule>, reset: Option<u64>)
     }
 }
 
-pub fn run(opts: &Options) -> Result<String, String> {
+pub fn run(opts: &Options) -> Result<String, Failure> {
     let dir = config::dir();
     let cfg = config::load(&dir)?;
     let topo = topology::read();
@@ -318,7 +402,7 @@ pub fn run(opts: &Options) -> Result<String, String> {
     let presentmon = find_presentmon(configured.as_deref(), &search)?;
 
     if pids_by_name(&opts.target).is_empty() {
-        return Err(format!("{} is not running. Start it first.", opts.target));
+        return Err(format!("{} is not running. Start it first.", opts.target).into());
     }
     let out_dir = dir.join("benchmarks").join(format!(
         "{}-{}",
@@ -327,6 +411,20 @@ pub fn run(opts: &Options) -> Result<String, String> {
     ));
     std::fs::create_dir_all(&out_dir)
         .map_err(|e| format!("cannot create {}: {e}", out_dir.display()))?;
+
+    // One-second trial capture before anyone switches to the game: finds
+    // missing rights and other PresentMon problems while they are cheap.
+    let trial = out_dir.join("trial.csv");
+    let checked = presentmon_capture(&presentmon, &opts.target, &trial, 1);
+    let _ = std::fs::remove_file(&trial);
+    if let Err(e) = checked {
+        let _ = std::fs::remove_dir_all(&out_dir);
+        return Err(if e.is_access_denied() && !crate::diag::is_elevated() {
+            Failure::NeedsElevation
+        } else {
+            Failure::Message(e.message())
+        });
+    }
 
     let original = cfg.rule_index(&opts.target).map(|i| cfg.rules[i].clone());
     let background = crate::tray::is_running();
@@ -382,7 +480,7 @@ pub fn run(opts: &Options) -> Result<String, String> {
     let reset = (!background && original.is_none()).then_some(run.topo.all_mask);
     restore(&dir, &opts.target, original, reset);
     beep();
-    outcome?;
+    outcome.map_err(Failure::Message)?;
 
     let columns: Vec<(String, Stats)> = frames
         .iter()
@@ -444,6 +542,44 @@ mod tests {
         assert_eq!((o.seconds, o.rounds, o.settle, o.countdown), (90, 3, 0, 0));
         assert_eq!(o.presentmon.as_deref(), Some("C:\\pm.exe"));
         assert!(o.window);
+    }
+
+    #[test]
+    fn options_survive_a_round_trip_through_the_command_line() {
+        let o = parse_args(&args(&[
+            "game.exe",
+            "--profiles",
+            "Cache,All cores",
+            "--seconds",
+            "90",
+            "--rounds",
+            "3",
+            "--settle",
+            "1",
+            "--countdown",
+            "2",
+            "--presentmon",
+            "C:\\my tools\\pm.exe",
+            "--window",
+        ]))
+        .unwrap();
+        assert_eq!(parse_args(&o.to_args()).unwrap(), o);
+        let plain = parse_args(&args(&["game.exe"])).unwrap();
+        assert_eq!(parse_args(&plain.to_args()).unwrap(), plain);
+    }
+
+    #[test]
+    fn access_denied_is_recognised_from_what_presentmon_says() {
+        let denied = CaptureError {
+            code: Some(6),
+            output: "error: failed to start trace session: access denied.\n".into(),
+        };
+        assert!(denied.is_access_denied());
+        assert!(denied.message().contains("exit code 6"));
+        assert!(denied.message().contains("failed to start trace session"));
+        let other = CaptureError { code: Some(5), output: String::new() };
+        assert!(!other.is_access_denied());
+        assert!(other.message().contains("without a message"));
     }
 
     #[test]

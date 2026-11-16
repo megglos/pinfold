@@ -287,7 +287,28 @@ fn cmd_benchmark(args: &[String]) -> i32 {
             say(&report);
             0
         }
-        Err(e) => {
+        Err(bench::Failure::NeedsElevation) => {
+            // PresentMon needs administrator rights: continue in an
+            // elevated copy of this command, in its own window.
+            say("PresentMon needs administrator rights. Continuing in an elevated window...");
+            let mut elevated = opts.to_args();
+            if !opts.window {
+                elevated.push("--window".to_string());
+            }
+            elevated.insert(0, "benchmark".to_string());
+            let started = std::env::current_exe()
+                .map_err(|e| e.to_string())
+                .and_then(|exe| win::launch_elevated(&exe, &elevated));
+            match started {
+                // The elevated window takes over; this one can close.
+                Ok(()) => return 0,
+                Err(e) => {
+                    say(&format!("Benchmark stopped: {e}"));
+                    1
+                }
+            }
+        }
+        Err(bench::Failure::Message(e)) => {
             say(&format!("Benchmark stopped: {e}"));
             1
         }

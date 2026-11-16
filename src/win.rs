@@ -84,6 +84,63 @@ pub fn console_window(title: &str) {
     }
 }
 
+/// Quote one command line argument for CreateProcess.
+pub fn quote_arg(arg: &str) -> String {
+    if !arg.is_empty() && !arg.contains([' ', '\t', '"']) {
+        return arg.to_string();
+    }
+    let mut out = String::from("\"");
+    let mut backslashes = 0;
+    for c in arg.chars() {
+        match c {
+            '\\' => backslashes += 1,
+            '"' => {
+                // Backslashes before a quote are doubled, the quote escaped.
+                out.push_str(&"\\".repeat(backslashes * 2 + 1));
+                backslashes = 0;
+                out.push('"');
+                continue;
+            }
+            _ => {
+                out.push_str(&"\\".repeat(backslashes));
+                backslashes = 0;
+            }
+        }
+        if c != '\\' {
+            out.push(c);
+        }
+    }
+    // Backslashes before the closing quote are doubled as well.
+    out.push_str(&"\\".repeat(backslashes * 2));
+    out.push('"');
+    out
+}
+
+/// Start a program elevated (UAC prompt) without waiting for it.
+pub fn launch_elevated(exe: &std::path::Path, args: &[String]) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::GetLastError;
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    let params: Vec<String> = args.iter().map(|a| quote_arg(a)).collect();
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            wide("runas").as_ptr(),
+            wide(&exe.to_string_lossy()).as_ptr(),
+            wide(&params.join(" ")).as_ptr(),
+            null(),
+            1, // SW_SHOWNORMAL
+        )
+    };
+    // ShellExecute reports success as a value above 32.
+    if result as usize > 32 {
+        Ok(())
+    } else if unsafe { GetLastError() } == 1223 {
+        Err("The elevation prompt was cancelled.".to_string())
+    } else {
+        Err("Could not start the elevated program.".to_string())
+    }
+}
+
 /// Keep a console window open until the user presses Enter.
 pub fn wait_for_enter() {
     say("\nPress Enter to close this window.");
@@ -111,4 +168,24 @@ pub fn message_box(text: &str) {
 /// File name part of a Windows path.
 pub fn file_name(path: &str) -> &str {
     path.rsplit(['\\', '/']).next().unwrap_or(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::quote_arg;
+
+    #[test]
+    fn arguments_are_quoted_only_when_needed() {
+        assert_eq!(quote_arg("game.exe"), "game.exe");
+        assert_eq!(quote_arg("--seconds"), "--seconds");
+        assert_eq!(quote_arg(""), "\"\"");
+        assert_eq!(quote_arg("Cache,All cores"), "\"Cache,All cores\"");
+        assert_eq!(quote_arg("C:\\my tools\\pm.exe"), "\"C:\\my tools\\pm.exe\"");
+    }
+
+    #[test]
+    fn trailing_backslash_and_quotes_survive() {
+        assert_eq!(quote_arg("C:\\my dir\\"), "\"C:\\my dir\\\\\"");
+        assert_eq!(quote_arg("say \"hi\""), "\"say \\\"hi\\\"\"");
+    }
 }
