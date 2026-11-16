@@ -64,6 +64,13 @@ impl Sandbox {
         Proc(self.command(&["run"]).stdout(Stdio::null()).spawn().expect("cannot start engine"))
     }
 
+    /// Start the background instance with tray icon. Its single-instance
+    /// lock and window are keyed by the config directory, so it runs next
+    /// to an installed Pinfold without either noticing the other.
+    pub fn start_tray(&self) -> Proc {
+        Proc(self.command(&[]).stdout(Stdio::null()).spawn().expect("cannot start tray instance"))
+    }
+
     pub fn config_path(&self) -> PathBuf {
         self.dir.join("config.json")
     }

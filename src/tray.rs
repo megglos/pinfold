@@ -7,13 +7,9 @@ use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use windows_sys::Win32::Foundation::{
-    GetLastError, ERROR_ALREADY_EXISTS, HWND, LPARAM, LRESULT, POINT, WPARAM,
+    CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HWND, LPARAM, LRESULT, POINT, WPARAM,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::Registry::{
-    RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
-    HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE,
-};
 use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::Controls::Dialogs::{
     GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OPENFILENAMEW,
@@ -23,16 +19,18 @@ use windows_sys::Win32::UI::Shell::{
     NIM_MODIFY, NOTIFYICONDATAW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-    DispatchMessageW, EnumWindows, GetCursorPos, GetMessageW, GetSystemMetrics, GetWindow,
-    GetWindowTextLengthW, GetWindowThreadProcessId, IsWindowVisible, KillTimer, LoadIconW,
-    LoadImageW, PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW,
-    SetForegroundWindow, SetTimer, TrackPopupMenu, TranslateMessage, GW_OWNER, HMENU,
-    IDI_APPLICATION, IMAGE_ICON, LR_SHARED, MF_CHECKED, MF_GRAYED, MF_POPUP, MF_SEPARATOR,
-    MF_STRING, MSG, SM_CXSMICON, SM_CYSMICON, SW_SHOWNORMAL, TPM_NONOTIFY, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON, WM_APP, WM_DESTROY, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
+    AppendMenuW, ChangeWindowMessageFilterEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
+    DestroyMenu, DestroyWindow, DispatchMessageW, EnumWindows, FindWindowW, GetCursorPos,
+    GetMessageW, GetSystemMetrics, GetWindow, GetWindowTextLengthW, GetWindowThreadProcessId,
+    IsWindowVisible, KillTimer, LoadIconW, LoadImageW, PostMessageW, PostQuitMessage,
+    RegisterClassW, RegisterWindowMessageW, SetForegroundWindow, SetTimer, TrackPopupMenu,
+    TranslateMessage, GW_OWNER, HMENU, IDI_APPLICATION, IMAGE_ICON, LR_SHARED, MF_CHECKED,
+    MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, MSGFLT_ALLOW, SM_CXSMICON, SM_CYSMICON,
+    SW_SHOWNORMAL, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_DESTROY, WM_LBUTTONUP,
+    WM_NULL, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
 };
 
+use crate::autostart::{self, Kind};
 use crate::config::{self, Mode};
 use crate::sys::{process_info, RealSystem};
 type Engine = crate::engine::Engine<RealSystem>;
@@ -40,14 +38,14 @@ use crate::win::{file_name, from_wide, message_box, wide};
 
 const WM_TRAY: u32 = WM_APP + 1;
 const TIMER_ID: usize = 1;
-const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-const RUN_VALUE: &str = "Pinfold";
 
 thread_local! {
     static ENGINE: RefCell<Option<Engine>> = const { RefCell::new(None) };
     static INTERVAL: Cell<u32> = const { Cell::new(0) };
 }
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
+static QUIT_MESSAGE: AtomicU32 = AtomicU32::new(0);
+const WINDOW_CLASS: &str = "PinfoldTray";
 
 enum Action {
     /// Create or update the file-name rule for this executable path.
@@ -266,7 +264,12 @@ fn build_menu(e: &Engine) -> (HMENU, Menu) {
         m.item(root, "Pause", e.paused, Action::TogglePause);
         m.item(root, "Open config", false, Action::OpenConfig);
         m.item(root, "Open log", false, Action::OpenLog);
-        m.item(root, "Start with Windows", autostart_enabled(), Action::ToggleAutostart);
+        m.item(
+            root,
+            "Start with Windows",
+            autostart::status() != Kind::Off,
+            Action::ToggleAutostart,
+        );
         m.sep(root);
         m.item(root, "Exit", false, Action::Exit);
         (root, m)
@@ -330,7 +333,7 @@ unsafe fn handle(hwnd: HWND, action: Action) {
         }
         Action::OpenConfig => open(&config::path(&config::dir()).to_string_lossy()),
         Action::OpenLog => open(&config::log_path(&config::dir()).to_string_lossy()),
-        Action::ToggleAutostart => set_autostart(!autostart_enabled()),
+        Action::ToggleAutostart => toggle_autostart(hwnd),
         Action::Exit => {
             DestroyWindow(hwnd);
         }
@@ -381,47 +384,97 @@ fn open(path: &str) {
     }
 }
 
-// --- Start with Windows (unelevated HKCU Run variant) ---------------------
+// --- Start with Windows -----------------------------------------------------
 
-fn run_key(access: u32) -> Option<HKEY> {
-    let mut h: HKEY = null_mut();
-    let rc = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, wide(RUN_KEY).as_ptr(), 0, access, &mut h) };
-    (rc == 0).then_some(h)
-}
-
-fn autostart_enabled() -> bool {
-    let Some(h) = run_key(KEY_READ) else {
-        return false;
+unsafe fn toggle_autostart(hwnd: HWND) {
+    let elevated =
+        ENGINE.with(|e| e.borrow().as_ref().map(|e| e.cfg.elevated_autostart)).unwrap_or(true);
+    let result = if autostart::status() == Kind::Off {
+        autostart::enable(elevated)
+    } else {
+        autostart::disable()
     };
-    let rc = unsafe {
-        RegQueryValueExW(h, wide(RUN_VALUE).as_ptr(), null(), null_mut(), null_mut(), null_mut())
-    };
-    unsafe { RegCloseKey(h) };
-    rc == 0
-}
-
-fn set_autostart(on: bool) {
-    let Some(h) = run_key(KEY_SET_VALUE) else {
-        return;
-    };
-    unsafe {
-        if on {
-            let exe = std::env::current_exe().unwrap_or_default();
-            let cmd = wide(&format!("\"{}\"", exe.display()));
-            RegSetValueExW(
-                h,
-                wide(RUN_VALUE).as_ptr(),
-                0,
-                1, // REG_SZ
-                cmd.as_ptr() as *const u8,
-                (cmd.len() * 2) as u32,
-            );
-        } else {
-            RegDeleteValueW(h, wide(RUN_VALUE).as_ptr());
+    match result {
+        Err(e) => message_box(&e),
+        Ok(kind) => {
+            crate::log::log(&format!("autostart {}", kind.describe()));
+            // Switch to the elevated instance right away instead of at the
+            // next logon: start the task and make room for it.
+            if kind == Kind::Elevated && !crate::diag::is_elevated() && autostart::run_task() {
+                DestroyWindow(hwnd);
+            }
         }
-        RegCloseKey(h);
     }
-    crate::log::log(if on { "autostart enabled (HKCU Run)" } else { "autostart disabled" });
+}
+
+// --- Single instance and quit -----------------------------------------------
+
+/// Distinguishes instances that use different config directories (tests);
+/// empty for the normal instance.
+fn instance_key() -> String {
+    match std::env::var("PINFOLD_DIR") {
+        Ok(dir) => {
+            let mut hash = 0xcbf2_9ce4_8422_2325u64; // FNV-1a
+            for b in dir.to_lowercase().bytes() {
+                hash = (hash ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            format!(".{hash:016x}")
+        }
+        Err(_) => String::new(),
+    }
+}
+
+fn window_title() -> Vec<u16> {
+    wide(&format!("Pinfold{}", instance_key()))
+}
+
+unsafe fn find_instance() -> HWND {
+    FindWindowW(wide(WINDOW_CLASS).as_ptr(), window_title().as_ptr())
+}
+
+fn quit_message() -> u32 {
+    unsafe { RegisterWindowMessageW(wide("Pinfold.Quit").as_ptr()) }
+}
+
+/// Ask the background instance to exit and wait until it is gone.
+/// Works from an unelevated process even when the instance is elevated.
+/// Returns false when it is still running after the timeout.
+pub fn quit_running_instance() -> bool {
+    unsafe {
+        let hwnd = find_instance();
+        if hwnd.is_null() {
+            return true;
+        }
+        PostMessageW(hwnd, quit_message(), 0, 0);
+        for _ in 0..100 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            if find_instance().is_null() {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+pub fn is_running() -> bool {
+    unsafe { !find_instance().is_null() }
+}
+
+/// Take the single-instance mutex. A previous instance that is just
+/// exiting (reinstall, switch to the elevated task) gets a few seconds.
+unsafe fn acquire_single_instance() -> bool {
+    let name = wide(&format!("Local\\Pinfold.Background{}", instance_key()));
+    for _ in 0..25 {
+        let handle = CreateMutexW(null(), 0, name.as_ptr());
+        if !handle.is_null() && GetLastError() != ERROR_ALREADY_EXISTS {
+            return true; // kept open for the lifetime of the process
+        }
+        if !handle.is_null() {
+            CloseHandle(handle);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    false
 }
 
 // --- Icon, window, message loop --------------------------------------------
@@ -489,6 +542,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             0
         }
         _ => {
+            if msg != 0 && msg == QUIT_MESSAGE.load(Ordering::Relaxed) {
+                DestroyWindow(hwnd);
+                return 0;
+            }
             // Explorer restarted: the icon has to be added again.
             if msg != 0 && msg == TASKBAR_CREATED.load(Ordering::Relaxed) {
                 update_icon(hwnd, NIM_ADD);
@@ -502,8 +559,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 /// Background instance: tray icon plus engine. Returns the exit code.
 pub fn run() -> i32 {
     unsafe {
-        CreateMutexW(null(), 0, wide("Local\\Pinfold.Background").as_ptr());
-        if GetLastError() == ERROR_ALREADY_EXISTS {
+        if !acquire_single_instance() {
             message_box("Pinfold is already running. Look for its icon in the notification area.");
             return 0;
         }
@@ -513,7 +569,7 @@ pub fn run() -> i32 {
         ENGINE.with(|e| *e.borrow_mut() = Some(engine));
 
         let hinstance = GetModuleHandleW(null());
-        let class = wide("PinfoldTray");
+        let class = wide(WINDOW_CLASS);
         let mut wc: WNDCLASSW = std::mem::zeroed();
         wc.lpfnWndProc = Some(wndproc);
         wc.hInstance = hinstance;
@@ -524,7 +580,7 @@ pub fn run() -> i32 {
         let hwnd = CreateWindowExW(
             0,
             class.as_ptr(),
-            wide("Pinfold").as_ptr(),
+            window_title().as_ptr(),
             0,
             0,
             0,
@@ -540,6 +596,10 @@ pub fn run() -> i32 {
         }
         TASKBAR_CREATED
             .store(RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()), Ordering::Relaxed);
+        // Let an unelevated `Pinfold.exe quit` reach an elevated instance.
+        let quit = quit_message();
+        QUIT_MESSAGE.store(quit, Ordering::Relaxed);
+        ChangeWindowMessageFilterEx(hwnd, quit, MSGFLT_ALLOW, null_mut());
         update_icon(hwnd, NIM_ADD);
         poll(hwnd);
 

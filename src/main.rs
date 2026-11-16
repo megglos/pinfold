@@ -7,6 +7,7 @@
 
 #![windows_subsystem = "windows"]
 
+mod autostart;
 mod config;
 mod diag;
 mod engine;
@@ -30,6 +31,8 @@ Pinfold - persistent per-process CPU affinity
   Pinfold.exe list                 show profiles and rules
   Pinfold.exe topology             show CPU topology and environment
   Pinfold.exe run                  run the engine in this console, no tray
+  Pinfold.exe autostart [on|off]   show or change starting with Windows
+  Pinfold.exe quit                 stop the background instance
   Pinfold.exe <exe-or-shortcut>    pick a profile for the program (drag and drop)
 
 Rules match by file name unless --full-path is given.
@@ -40,8 +43,8 @@ fn main() {
     let code = match args.first().map(String::as_str) {
         None => tray::run(),
         Some(
-            cmd
-            @ ("run" | "add" | "remove" | "list" | "topology" | "help" | "--help" | "-h" | "/?"),
+            cmd @ ("run" | "add" | "remove" | "list" | "topology" | "autostart" | "quit" | "help"
+            | "--help" | "-h" | "/?"),
         ) => {
             win::console_init();
             match cmd {
@@ -50,6 +53,8 @@ fn main() {
                 "remove" => cmd_remove(&args[1..]),
                 "list" => cmd_list(),
                 "topology" => cmd_topology(),
+                "autostart" => cmd_autostart(&args[1..]),
+                "quit" => cmd_quit(),
                 _ => {
                     say(USAGE);
                     0
@@ -224,6 +229,49 @@ fn cmd_topology() -> i32 {
         say(&format!("  {:<12} cpus {}", p.name, p.cpus));
     }
     0
+}
+
+/// `autostart` shows the state; `on` and `off` change it. The elevated
+/// variant shows one UAC prompt.
+fn cmd_autostart(args: &[String]) -> i32 {
+    let result = match args.first().map(String::as_str) {
+        None => Ok(autostart::status()),
+        Some("on") => {
+            let Some(cfg) = load_config(false) else {
+                return 1;
+            };
+            autostart::enable(cfg.elevated_autostart)
+        }
+        Some("off") => autostart::disable(),
+        Some(_) => {
+            say(USAGE);
+            return 2;
+        }
+    };
+    match result {
+        Ok(kind) => {
+            say(&format!("autostart: {}", kind.describe()));
+            0
+        }
+        Err(e) => {
+            say(&e);
+            1
+        }
+    }
+}
+
+fn cmd_quit() -> i32 {
+    if !tray::is_running() {
+        say("Pinfold is not running");
+        return 0;
+    }
+    if tray::quit_running_instance() {
+        say("Pinfold stopped");
+        0
+    } else {
+        say("Pinfold did not stop in time");
+        1
+    }
 }
 
 /// Started with a single path: something was dropped onto the executable.

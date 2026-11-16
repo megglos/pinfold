@@ -62,6 +62,10 @@ pub struct Rule {
 pub struct Config {
     #[serde(default = "default_poll")]
     pub poll_interval_ms: u32,
+    /// "Start with Windows" uses an elevated Task Scheduler logon task
+    /// (true, default) or the unelevated HKCU Run key (false).
+    #[serde(default = "default_true")]
+    pub elevated_autostart: bool,
     #[serde(default)]
     pub profiles: Vec<Profile>,
     #[serde(default)]
@@ -70,7 +74,12 @@ pub struct Config {
 
 impl Config {
     pub fn defaults(topo: &Topology) -> Config {
-        Config { poll_interval_ms: 1000, profiles: topo.default_profiles(), rules: Vec::new() }
+        Config {
+            poll_interval_ms: 1000,
+            elevated_autostart: true,
+            profiles: topo.default_profiles(),
+            rules: Vec::new(),
+        }
     }
 
     pub fn poll_ms(&self) -> u32 {
@@ -194,7 +203,12 @@ mod tests {
 
     #[test]
     fn upsert() {
-        let mut cfg = Config { poll_interval_ms: 100, profiles: vec![], rules: vec![] };
+        let mut cfg = Config {
+            poll_interval_ms: 100,
+            elevated_autostart: true,
+            profiles: vec![],
+            rules: vec![],
+        };
         assert!(cfg.upsert_rule("Foo.exe", "Cache", None));
         assert!(!cfg.upsert_rule("foo.EXE", "Frequency", Some(Mode::Both)));
         assert_eq!(cfg.rules.len(), 1);
