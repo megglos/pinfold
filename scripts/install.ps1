@@ -1,19 +1,19 @@
 # Builds Pinfold and installs it to %LocalAppData%\Programs\Pinfold.
-# Stops a running instance first, starts the new one afterwards, and keeps
-# an existing "Start with Windows" entry pointing at the installed exe.
+# Stops a running instance first (also an elevated one) and starts the new
+# one afterwards, elevated through the logon task when that exists.
 #
 #   powershell -ExecutionPolicy Bypass -File scripts\install.ps1 [-Autostart] [-NoStart]
 
 param(
-    [switch]$Autostart,   # create the "Start with Windows" entry if missing
+    [switch]$Autostart,   # turn "Start with Windows" on (one UAC prompt for the elevated variant)
     [switch]$NoStart      # do not start Pinfold after installing
 )
 $ErrorActionPreference = 'Stop'
 
 $repo = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+$built = Join-Path $repo 'target\release\Pinfold.exe'
 $dest = Join-Path $env:LOCALAPPDATA 'Programs\Pinfold'
 $exe = Join-Path $dest 'Pinfold.exe'
-$runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     $env:PATH += ";$env:USERPROFILE\.cargo\bin"
@@ -27,22 +27,35 @@ try {
     Pop-Location
 }
 
-# Only the background instance installed at the destination is stopped.
+# Ask the running instance to exit. This also reaches an elevated instance,
+# which an unelevated Stop-Process could not touch. (Piping makes PowerShell
+# wait for the GUI-subsystem exe.)
+& $built quit | Out-Host
+# Fallback for versions that predate the quit command.
 Get-Process Pinfold -ErrorAction SilentlyContinue |
     Where-Object { $_.Path -eq $exe } |
-    ForEach-Object { Stop-Process -Id $_.Id; $_.WaitForExit(5000) | Out-Null }
+    ForEach-Object {
+        try { Stop-Process -Id $_.Id -ErrorAction Stop; $_.WaitForExit(5000) | Out-Null }
+        catch { throw "Pinfold (pid $($_.Id)) is running elevated and did not quit; exit it from the tray menu and run this script again." }
+    }
 
 New-Item -ItemType Directory -Force $dest | Out-Null
-Copy-Item (Join-Path $repo 'target\release\Pinfold.exe') $exe -Force
+Copy-Item $built $exe -Force
 "installed $exe ($((Get-Item $exe).Length) bytes)"
 
-$current = (Get-ItemProperty $runKey -ErrorAction SilentlyContinue).Pinfold
-if ($Autostart -or $current) {
-    Set-ItemProperty -Path $runKey -Name Pinfold -Value "`"$exe`""
-    "autostart: $exe"
+if ($Autostart) {
+    & $exe autostart on | Out-Host
 }
 
 if (-not $NoStart) {
-    Start-Process $exe
-    "started"
+    # Prefer the logon task: it starts Pinfold elevated without a prompt.
+    schtasks.exe /Query /TN Pinfold 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        schtasks.exe /Run /TN Pinfold | Out-Null
+        "started through the logon task (elevated)"
+    } else {
+        Start-Process $exe
+        "started"
+    }
 }
+& $exe autostart | Out-Host
