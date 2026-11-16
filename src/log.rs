@@ -1,5 +1,5 @@
-//! Plain text log next to the config. Written only on events.
-//! Size-capped at 1 MB with one rotation (pinfold.log -> pinfold.log.1).
+//! Text log next to the config. Written only for events.
+//! 1 MB maximum, then pinfold.log becomes pinfold.log.1.
 
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,7 +9,7 @@ const MAX_BYTES: u64 = 1024 * 1024;
 
 static ECHO: AtomicBool = AtomicBool::new(false);
 
-/// Also print every entry to stdout (console `run` mode).
+/// Also print each entry to stdout (console `run` mode).
 pub fn set_echo(on: bool) {
     ECHO.store(on, Ordering::Relaxed);
 }

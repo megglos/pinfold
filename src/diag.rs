@@ -1,4 +1,4 @@
-//! Startup environment snapshot. Read-only.
+//! The environment at start. Read only.
 
 use std::ptr::{null, null_mut};
 use windows_sys::Win32::System::Registry::{
@@ -87,9 +87,9 @@ impl Drop for Key {
     }
 }
 
-/// True for an unelevated process of an administrator: the account has a
-/// second, elevated token, so the logon task (highest privileges) would
-/// run elevated. False for a standard user and for an elevated process.
+/// True for a process of an administrator without elevation. The account
+/// has a second, elevated token, thus the logon task runs elevated.
+/// False for a standard user and for an elevated process.
 pub fn has_elevated_twin() -> bool {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::Security::{GetTokenInformation, TokenElevationType, TOKEN_QUERY};
@@ -118,7 +118,7 @@ pub fn is_elevated() -> bool {
     unsafe { IsUserAnAdmin() != 0 }
 }
 
-/// Lines describing the environment (F19).
+/// Lines about the environment (F19).
 pub fn snapshot(topo: &Topology) -> Vec<String> {
     let mut lines = vec![
         format!(
@@ -138,7 +138,7 @@ pub fn snapshot(topo: &Topology) -> Vec<String> {
         Some(k) => lines.push(format!("env: amd3dvcache preferences: {}", k.values().join(", "))),
         None => lines.push("env: amd3dvcache preferences: key not present".into()),
     }
-    // Game Mode is on unless AutoGameModeEnabled is explicitly 0.
+    // Game Mode is on if AutoGameModeEnabled is not 0.
     let game_mode = Key::open(HKEY_CURRENT_USER, "Software\\Microsoft\\GameBar")
         .and_then(|k| k.dword("AutoGameModeEnabled"));
     lines.push(format!(

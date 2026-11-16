@@ -1,8 +1,8 @@
 //! Poll, match, apply, drift check, back-off.
 //!
-//! The engine has no UI and no direct OS dependencies: everything it does
-//! to processes goes through the `System` trait, so it can be tested with
-//! a fake (see the tests at the bottom). `sys::RealSystem` is the real one.
+//! The engine has no UI and does not call the OS directly. It uses the
+//! `System` trait for all process operations, thus tests can use a fake
+//! (`engine/tests.rs`). `sys::RealSystem` is the real system.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -12,21 +12,21 @@ use crate::config::{self, Config, Mode};
 use crate::topology::{self, format_mask, Topology};
 use crate::win::file_name;
 
-/// More than this many drifts inside the window marks the instance contested.
+/// More drifts than this in the window make the instance contested.
 pub const DRIFT_LIMIT: usize = 5;
 pub const DRIFT_WINDOW: Duration = Duration::from_secs(60);
 
 /// Opaque process handle owned by the `System` implementation.
 pub type Handle = usize;
 
-/// Everything the engine needs from the operating system.
+/// All that the engine needs from the operating system.
 /// Errors are Win32 error codes.
 pub trait System {
     /// Replace `out` with the PIDs of all running processes.
     fn pids(&mut self, out: &mut Vec<u32>);
-    /// Image path and start time; None when the process cannot be queried.
+    /// Image path and start time. None if the query fails.
     fn info(&mut self, pid: u32) -> Option<(String, u64)>;
-    /// Open a process for reading and changing its affinity.
+    /// Open a process to read and change its affinity.
     fn open(&mut self, pid: u32) -> Result<Handle, u32>;
     fn close(&mut self, handle: Handle);
     fn exited(&mut self, handle: Handle) -> bool;
@@ -55,10 +55,10 @@ impl State {
     }
 }
 
-/// A running process that matched a rule, identified by PID plus start
-/// time. The handle stays open for enforcement, which also keeps the PID
-/// from being reused; a denied process has no handle, so its start time is
-/// compared on every poll instead.
+/// A running process that matches a rule. PID and start time identify it.
+/// The handle stays open for enforcement. The open handle also prevents
+/// reuse of the PID. A denied process has no handle, thus each poll
+/// compares its start time.
 pub struct Tracked {
     pub pid: u32,
     start: u64,
@@ -80,7 +80,7 @@ pub struct Engine<S: System> {
     dir: PathBuf,
     pub cfg: Config,
     pub topo: Topology,
-    /// Per rule: the resolved profile, or None when the rule is invalid.
+    /// For each rule: its profile, or None if the rule is not valid.
     resolved: Vec<Option<Resolved>>,
     cfg_mtime: Option<SystemTime>,
     /// Sorted PID list of the previous poll.
@@ -90,8 +90,8 @@ pub struct Engine<S: System> {
     pub paused: bool,
 }
 
-/// Full path rules win over file name rules; within each kind the first
-/// rule in the file wins. `usable` filters out invalid rules.
+/// Full path rules come before file name rules. In each kind, the first
+/// rule in the file wins. `usable` removes rules that are not valid.
 pub fn match_rule(cfg: &Config, path: &str, usable: impl Fn(usize) -> bool) -> Option<usize> {
     let path_l = path.to_lowercase();
     let name_l = file_name(&path_l);
@@ -106,7 +106,7 @@ pub fn match_rule(cfg: &Config, path: &str, usable: impl Fn(usize) -> bool) -> O
     })
 }
 
-/// Records one drift and reports whether the instance is now contested.
+/// Records one drift. Returns true if the instance is now contested.
 fn record_drift(drifts: &mut VecDeque<Instant>, now: Instant) -> bool {
     drifts.push_back(now);
     while let Some(&front) = drifts.front() {
@@ -120,7 +120,7 @@ fn record_drift(drifts: &mut VecDeque<Instant>, now: Instant) -> bool {
 }
 
 impl<S: System> Engine<S> {
-    /// `dir` holds config.json; it is created with defaults on first run.
+    /// `dir` contains config.json. At the first start, it gets the defaults.
     pub fn new(mut sys: S, dir: PathBuf, topo: Topology) -> Engine<S> {
         let (cfg, note) = config::load_or_create(&dir, &topo);
         if let Some(note) = note {
@@ -172,8 +172,8 @@ impl<S: System> Engine<S> {
         match_rule(&self.cfg, path, |i| self.resolved[i].is_some())
     }
 
-    /// One poll. Cheap when nothing changed: one PID list, a diff, and a
-    /// few calls per matched process.
+    /// One poll. If nothing changed, it costs one PID list, a compare and a
+    /// few calls for each matched process.
     pub fn tick(&mut self) {
         if config::mtime(&self.dir) != self.cfg_mtime {
             self.reload_from_disk();
@@ -185,7 +185,7 @@ impl<S: System> Engine<S> {
         self.sys.pids(&mut self.cur);
         self.cur.sort_unstable();
 
-        // Drop processes that exited.
+        // Remove processes that stopped.
         let mut i = 0;
         while i < self.tracked.len() {
             let t = &self.tracked[i];
@@ -193,7 +193,7 @@ impl<S: System> Engine<S> {
             let gone = self.cur.binary_search(&pid).is_err()
                 || match t.handle {
                     Some(h) => self.sys.exited(h),
-                    // No handle pins the PID: it may belong to a new process.
+                    // No handle keeps the PID: a new process can have it.
                     None => self.sys.info(pid).is_some_and(|(_, s)| s != start),
                 };
             if gone {
@@ -201,7 +201,7 @@ impl<S: System> Engine<S> {
                 if let Some(h) = t.handle {
                     self.sys.close(h);
                 }
-                // A reused PID is still in the list: look at it again.
+                // A reused PID is still in the list: examine it again.
                 if let Ok(pos) = self.prev.binary_search(&pid) {
                     self.prev.remove(pos);
                 }
@@ -210,7 +210,7 @@ impl<S: System> Engine<S> {
             }
         }
 
-        // Only new PIDs are opened and matched.
+        // Open and match only new PIDs.
         for i in 0..self.cur.len() {
             let pid = self.cur[i];
             if pid == 0 || self.prev.binary_search(&pid).is_ok() {
@@ -290,7 +290,7 @@ impl<S: System> Engine<S> {
         Ok(())
     }
 
-    /// Describes what was found when it differs from what the rule applied.
+    /// Describes the found value if it is not the value that the rule applied.
     fn mismatch(&mut self, handle: Handle, rule: usize) -> Option<String> {
         let res = self.resolved[rule].as_ref()?;
         let mode = self.cfg.rules[rule].mode;
@@ -358,8 +358,8 @@ impl<S: System> Engine<S> {
         self.sys.close(handle);
     }
 
-    /// Call after `self.cfg` changed. Everything tracked is reset to all
-    /// cores and the next poll re-matches every process from scratch.
+    /// Call after a change of `self.cfg`. Sets all tracked processes to all
+    /// cores. The next poll matches all processes again.
     fn config_changed(&mut self) {
         self.resolve();
         let tracked = std::mem::take(&mut self.tracked);
@@ -388,9 +388,9 @@ impl<S: System> Engine<S> {
         }
     }
 
-    /// Persist `self.cfg` after an edit from the UI and apply it right away.
+    /// Save `self.cfg` after a change from the UI and apply it immediately.
     pub fn save_and_apply(&mut self) {
-        // Never silently replace a file the user broke while editing it.
+        // Do not replace a file that the user broke during an edit.
         let path = config::path(&self.dir);
         if path.exists() && config::load(&self.dir).is_err() {
             let backup = self.dir.join("config.broken.json");
@@ -413,7 +413,7 @@ impl<S: System> Engine<S> {
         self.paused = paused;
         self.sys.log(if paused { "paused" } else { "resumed" });
         if !paused {
-            // Forget everything and rescan; pins set before the pause stay.
+            // Forget all and scan again. Pins from before the pause stay.
             let tracked = std::mem::take(&mut self.tracked);
             for t in &tracked {
                 self.release(t, false);
@@ -423,7 +423,7 @@ impl<S: System> Engine<S> {
         }
     }
 
-    /// Worst state and instance count of the running processes for a rule.
+    /// Worst state and number of running processes for a rule.
     pub fn rule_status(&self, rule: usize) -> (State, usize) {
         let mut state = State::Ok;
         let mut count = 0;

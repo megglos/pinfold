@@ -1,16 +1,15 @@
-# Compares frame-time captures, e.g. one game session pinned to "Cache"
-# and one pinned to "Frequency".
+# Compares frame-time captures. Example: one game session on "Cache" and
+# one on "Frequency".
 #
-# Input: CSV files written by PresentMon (or tools built on it, such as
-# CapFrameX exports). The frame time column is found by name:
-# FrameTime, MsBetweenPresents or msBetweenPresents.
+# Input: CSV files from PresentMon or tools that use it (CapFrameX).
+# The frame time column is FrameTime, MsBetweenPresents or msBetweenPresents.
 #
 #   powershell -ExecutionPolicy Bypass -File scripts\compare-frametimes.ps1 cache.csv frequency.csv
 #   ... -SkipSeconds 10      ignore the first seconds of each capture (loading, alt-tab)
 #   ... -Process longshot.exe  keep only rows of this process (captures of everything)
 #
-# Lower frame times are better. The first file is the baseline for the
-# difference columns.
+# Lower frame times are better. The difference columns compare with the
+# first file.
 
 param(
     [Parameter(Mandatory, Position = 0, ValueFromRemainingArguments)]
@@ -21,7 +20,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 function Get-Percentile([double[]]$sorted, [double]$p) {
-    # Linear interpolation between closest ranks; $sorted is ascending.
+    # Linear interpolation between the nearest ranks. $sorted is ascending.
     if ($sorted.Count -eq 1) { return $sorted[0] }
     $rank = ($p / 100) * ($sorted.Count - 1)
     $lo = [math]::Floor($rank); $hi = [math]::Ceiling($rank)
@@ -49,7 +48,7 @@ function Read-Capture([string]$path) {
     if ($times.Count -lt 2) { throw "$path has fewer than 2 usable frames" }
     $sorted = $times.ToArray(); [array]::Sort($sorted)
     $sum = ($sorted | Measure-Object -Sum).Sum
-    # "1 % low": average FPS over the slowest 1 % of frames.
+    # "1 % low": average FPS of the slowest 1 % of the frames.
     $n1 = [math]::Max(1, [int][math]::Ceiling($sorted.Count * 0.01))
     $n01 = [math]::Max(1, [int][math]::Ceiling($sorted.Count * 0.001))
     $slow1 = ($sorted[($sorted.Count - $n1)..($sorted.Count - 1)] | Measure-Object -Average).Average
@@ -77,7 +76,7 @@ $rows = foreach ($metric in $base.Stats.Keys) {
         $v = $c.Stats[$metric]
         $row[$c.Name] = if ($metric -eq 'frames') { '{0:N0}' -f $v } else { '{0:N2}' -f $v }
         if ($c.Name -ne $base.Name) {
-            # Every row carries the column, or the table would drop it.
+            # Each row must have the column, or the table does not show it.
             $row["$($c.Name) vs $($base.Name)"] = if ($metric -in 'frames', 'duration s') { '' } else {
                 '{0:+0.0;-0.0}%' -f (100 * ($v - $base.Stats[$metric]) / $base.Stats[$metric])
             }

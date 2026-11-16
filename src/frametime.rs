@@ -1,12 +1,12 @@
-//! Frame-time captures: reading PresentMon CSV files and turning frame
-//! times into the usual statistics. Pure functions, no OS access.
+//! Frame-time captures: reads PresentMon CSV files and calculates the
+//! usual statistics. Pure functions, no OS access.
 
 /// One process in a capture.
 struct Group {
     application: String,
     pid: String,
     times: Vec<f64>,
-    /// Sum and count of the GPU busy times that were reported.
+    /// Sum and number of the reported GPU busy times.
     gpu_busy: f64,
     gpu_rows: usize,
 }
@@ -16,8 +16,8 @@ struct Group {
 pub struct Capture {
     /// Frame times in milliseconds.
     pub times: Vec<f64>,
-    /// Share of the frame time the GPU was busy (0..1), when PresentMon
-    /// reported it for most frames.
+    /// Part of the frame time when the GPU was busy (0..1). Only if
+    /// PresentMon reported it for most frames.
     pub gpu_share: Option<f64>,
 }
 
@@ -30,7 +30,7 @@ impl Group {
     }
 }
 
-/// Frame times per process, in order of first appearance.
+/// Frame times for each process, in the order of the first frame.
 ///
 /// The frame time column is `MsBetweenPresents` (default metrics) or
 /// `FrameTime` (2.x metrics).
@@ -85,19 +85,18 @@ fn groups(text: &str) -> Result<Vec<Group>, String> {
 }
 
 /// Frame times in milliseconds of `target` (an executable file name) from a
-/// PresentMon CSV of the whole system.
+/// PresentMon CSV of the full system.
 ///
-/// Games often have helper processes with the same name that present
-/// nothing, so of the processes called `target` the one with the most
-/// frames is taken. When `target` presented no frames, the error names the
-/// programs that did: that tells a game that was not in front from a
-/// capture that did not work at all.
+/// Games frequently have helper processes with the same name and no
+/// frames. Thus use the process called `target` with the most frames. If
+/// `target` has no frames, the error gives the programs with frames. This
+/// shows if the game was not in front or if the capture failed.
 pub fn parse_csv(text: &str, target: &str) -> Result<Capture, String> {
     let groups = groups(text)?;
     if groups.is_empty() {
         return Err("the capture contains no frames from any program".to_string());
     }
-    // A capture without a name column holds whatever was asked for.
+    // A capture without a name column has only the requested process.
     let named = groups.iter().any(|g| !g.application.is_empty());
     let best = groups
         .iter()
@@ -106,7 +105,7 @@ pub fn parse_csv(text: &str, target: &str) -> Result<Capture, String> {
     if let Some(g) = best {
         return Ok(g.capture());
     }
-    // Total frames per program, busiest first.
+    // Number of frames for each program, highest first.
     let mut seen: Vec<(String, usize)> = Vec::new();
     for g in &groups {
         match seen.iter_mut().find(|(name, _)| name.eq_ignore_ascii_case(&g.application)) {
@@ -127,9 +126,9 @@ pub struct Stats {
     pub frames: usize,
     pub seconds: f64,
     pub avg_fps: f64,
-    /// Average FPS over the slowest 1 % of frames.
+    /// Average FPS of the slowest 1 % of the frames.
     pub low1_fps: f64,
-    /// Average FPS over the slowest 0.1 % of frames.
+    /// Average FPS of the slowest 0.1 % of the frames.
     pub low01_fps: f64,
     pub avg_ms: f64,
     pub p50_ms: f64,
@@ -139,7 +138,7 @@ pub struct Stats {
     pub max_ms: f64,
 }
 
-/// Percentile with linear interpolation between closest ranks.
+/// Percentile with linear interpolation between the nearest ranks.
 fn percentile(sorted: &[f64], p: f64) -> f64 {
     if sorted.len() == 1 {
         return sorted[0];
@@ -178,8 +177,8 @@ pub fn stats(frame_times_ms: &[f64]) -> Option<Stats> {
     })
 }
 
-/// Side-by-side table. The first column is the baseline for the
-/// difference columns.
+/// Table with one column for each capture. The difference columns compare
+/// with the first column.
 pub fn report(columns: &[(String, Stats)]) -> String {
     type Getter = fn(&Stats) -> f64;
     let metrics: [(&str, Getter, bool); 11] = [
@@ -199,7 +198,7 @@ pub fn report(columns: &[(String, Stats)]) -> String {
         return String::new();
     };
 
-    // Build all cells first, then pad every column to its widest cell.
+    // Make all cells, then pad each column to its widest cell.
     let mut table: Vec<Vec<String>> = Vec::new();
     let mut head = vec!["metric".to_string()];
     for (i, (name, _)) in columns.iter().enumerate() {
@@ -254,18 +253,17 @@ pub fn report(columns: &[(String, Stats)]) -> String {
 /// What a benchmark says, in one or two sentences.
 #[derive(Debug, PartialEq)]
 pub struct Verdict {
-    /// The profile that is faster beyond doubt, if there is one.
+    /// The profile that is clearly faster, if there is one.
     pub winner: Option<String>,
     pub text: String,
 }
 
-/// Decide from average FPS: `overall` per profile (all rounds combined)
-/// and `rounds` as (round, profile, avg FPS) per capture.
+/// Decision from average FPS: `overall` for each profile (all rounds) and
+/// `rounds` as (round, profile, avg FPS) for each capture.
 ///
-/// A profile wins when it is ahead of every other one in every round, and
-/// its lead is larger than the spread between rounds of the same profile
-/// (at least 2 %). With a single round the spread is unknown; 3 % is
-/// required then.
+/// A profile wins if it is first in all rounds and its lead is larger than
+/// the spread between rounds of one profile (at least 2 %). With one round,
+/// the spread is not known: then the lead must be 3 %.
 pub fn verdict(overall: &[(String, f64)], rounds: &[(u32, String, f64)]) -> Verdict {
     let mut ranked: Vec<&(String, f64)> = overall.iter().collect();
     ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
@@ -347,11 +345,12 @@ pub fn verdict(overall: &[(String, f64)], rounds: &[(u32, String, f64)]) -> Verd
     }
 }
 
-/// GPU busy share from which a capture counts as GPU-bound.
+/// Minimum GPU busy part for a GPU-bound capture.
 const GPU_BOUND: f64 = 0.9;
 
-/// A line on how busy the GPU was per profile, and whether that hides any
-/// effect of the CPU placement. `shares` is (profile, GPU busy share).
+/// A line about the GPU load for each profile. It also tells if the GPU
+/// load hides the effect of the CPU placement. `shares` is (profile, GPU
+/// busy part).
 pub fn gpu_note(shares: &[(String, f64)]) -> Option<String> {
     if shares.is_empty() {
         return None;
@@ -498,7 +497,7 @@ mod tests {
                    dwm.exe,9,16\ndwm.exe,9,16\ndwm.exe,9,16\ndwm.exe,9,16\n\
                    Game.EXE,8,10\ngame.exe,8,11\n\
                    game.exe,7,500\n";
-        // Not the busiest program overall, and not the helper process.
+        // Not the program with the most frames, and not the helper process.
         assert_eq!(parse_csv(csv, "game.exe").unwrap().times, [10.0, 11.0]);
     }
 
@@ -557,7 +556,7 @@ mod tests {
         assert!(close(s.max_ms, 50.0));
         assert!(close(s.low1_fps, 20.0), "slowest 1 % are the ten 50 ms frames");
         assert!(close(s.avg_fps, 1000.0 * 1000.0 / 10400.0));
-        // p99 sits between the last 10 ms and the first 50 ms frame.
+        // p99 is between the last 10 ms frame and the first 50 ms frame.
         assert!(s.p99_ms > 10.0 && s.p99_ms < 50.0);
     }
 

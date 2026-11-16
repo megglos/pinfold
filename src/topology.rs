@@ -1,5 +1,5 @@
 //! CPU topology: L3 domains, SMT cores, CPU Set ids, default profiles.
-//! Everything comes from the Windows APIs, never from assumed core numbering.
+//! All data comes from the Windows API. Do not assume a core numbering.
 
 use std::ptr::null_mut;
 use windows_sys::Win32::System::SystemInformation::{
@@ -36,7 +36,7 @@ fn u64_at(b: &[u8], o: usize) -> u64 {
     u64::from_le_bytes(b[o..o + 8].try_into().unwrap())
 }
 
-/// Calls `f` with the raw bytes of every variable-length record.
+/// Calls `f` with the raw bytes of each record (records have different sizes).
 /// Record header: Relationship u32 @0, Size u32 @4, payload @8.
 fn for_each_lpi_record(relation: i32, mut f: impl FnMut(&[u8])) {
     unsafe {
@@ -125,8 +125,8 @@ impl Topology {
         ids
     }
 
-    /// "Cache" and "Frequency" when two L3 domains of different size exist
-    /// (the larger L3 is the V-Cache CCD); "All cores" always.
+    /// "Cache" and "Frequency" if there are two L3 domains of different size
+    /// (the larger L3 is the V-Cache CCD). "All cores" always.
     pub fn default_profiles(&self) -> Vec<Profile> {
         let mut out = Vec::new();
         if self.l3.len() == 2 && self.l3[0].size != self.l3[1].size {

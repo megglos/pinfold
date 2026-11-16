@@ -1,6 +1,6 @@
-# Builds Pinfold and installs it to %LocalAppData%\Programs\Pinfold.
-# Stops a running instance first (also an elevated one) and starts the new
-# one afterwards, elevated through the logon task when that exists.
+# Builds Pinfold and installs it in %LocalAppData%\Programs\Pinfold.
+# Stops the running instance (also an elevated one), then starts the new
+# one. If the logon task exists, the new instance runs elevated.
 #
 #   powershell -ExecutionPolicy Bypass -File scripts\install.ps1 [-Autostart] [-NoStart]
 
@@ -27,11 +27,11 @@ try {
     Pop-Location
 }
 
-# Ask the running instance to exit. This also reaches an elevated instance,
-# which an unelevated Stop-Process could not touch. (Piping makes PowerShell
-# wait for the GUI-subsystem exe.)
+# Tell the running instance to stop. This also works for an elevated
+# instance, which Stop-Process without elevation cannot stop. (The pipe
+# makes PowerShell wait for the GUI exe.)
 & $built quit | Out-Host
-# Fallback for versions that predate the quit command.
+# For old versions without the quit command.
 Get-Process Pinfold -ErrorAction SilentlyContinue |
     Where-Object { $_.Path -eq $exe } |
     ForEach-Object {
@@ -48,7 +48,7 @@ if ($Autostart) {
 }
 
 if (-not $NoStart) {
-    # Prefer the logon task: it starts Pinfold elevated without a prompt.
+    # Use the logon task if possible. It starts Pinfold elevated without a prompt.
     schtasks.exe /Query /TN Pinfold 2>$null | Out-Null
     if ($LASTEXITCODE -eq 0) {
         schtasks.exe /Run /TN Pinfold | Out-Null

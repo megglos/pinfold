@@ -1,5 +1,5 @@
-//! Turning what the user pointed at (an `.exe`, a `.lnk` shortcut, a `.url`
-//! link) into the program a rule should be created for.
+//! Finds the program for a rule from an `.exe`, a `.lnk` shortcut or a
+//! `.url` link.
 
 use std::ffi::c_void;
 use std::ptr::{null, null_mut};
@@ -17,9 +17,9 @@ pub const NOT_A_PROGRAM: &str =
      so Pinfold cannot tell which program it starts.\n\n\
      Start the program once and assign it from the tray menu under Assign.";
 
-/// The executable path for a dropped or given path.
-/// `.exe` is taken as is, `.lnk` is resolved to its target, anything else
-/// is an error with a message for the user.
+/// The executable for a dropped or given path. An `.exe` stays as it is.
+/// For a `.lnk`, the result is its target. Other files give an error
+/// message for the user.
 pub fn program_for(path: &str) -> Result<String, String> {
     program_for_with(path, resolve_lnk)
 }
@@ -41,7 +41,7 @@ fn program_for_with(
     if has_ext(path, ".lnk") {
         let target = resolve(path)?;
         if target.is_empty() {
-            // Store apps and advertised (installer) shortcuts have no path.
+            // Store apps and installer shortcuts have no path.
             return Err(NOT_A_PROGRAM.to_string());
         }
         if !has_ext(&target, ".exe") {
@@ -82,7 +82,7 @@ unsafe fn release(object: *mut c_void) {
     f(object);
 }
 
-/// Target path of a `.lnk` file; empty when the shortcut has no file target.
+/// Target path of a `.lnk` file. Empty if the target is not a file.
 fn resolve_lnk(path: &str) -> Result<String, String> {
     let failed =
         |what: &str, hr: HRESULT| format!("Cannot read the shortcut ({what}, 0x{hr:08X}).");

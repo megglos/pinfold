@@ -53,8 +53,8 @@ pub fn pids_by_name(name: &str) -> Vec<u32> {
         .collect()
 }
 
-/// Affinity mask of a process; needs query rights only, so it also works
-/// for an elevated process from an unelevated one.
+/// Affinity mask of a process. Needs only query rights, thus it also works
+/// on an elevated process from a process without elevation.
 pub fn affinity_of(pid: u32) -> Option<u64> {
     unsafe {
         let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);

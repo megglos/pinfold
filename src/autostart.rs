@@ -1,10 +1,10 @@
 //! "Start with Windows".
 //!
-//! Elevated variant (default): a Task Scheduler logon task with highest
-//! privileges, so Pinfold can pin elevated games without a UAC prompt at
-//! every logon. Creating or deleting the task needs one elevation prompt.
+//! Elevated variant (default): a Task Scheduler logon task with the highest
+//! rights. Pinfold can then pin elevated games without a UAC prompt at each
+//! logon. To make or delete the task, the user gets one UAC prompt.
 //!
-//! Unelevated variant: a value under `HKCU\...\Run`. Chosen by setting
+//! Variant without elevation: a value in `HKCU\...\Run`. To use it, set
 //! `"elevatedAutostart": false` in the config.
 
 use std::os::windows::process::CommandExt;
@@ -36,7 +36,7 @@ pub enum Kind {
     Off,
     /// `HKCU\...\Run`
     User,
-    /// Task Scheduler logon task, highest privileges
+    /// Task Scheduler logon task, highest rights
     Elevated,
 }
 
@@ -50,8 +50,8 @@ impl Kind {
     }
 }
 
-/// Always the copy in System32, never one found through PATH: this program
-/// is started elevated.
+/// Always the copy in System32, not one from PATH: this program runs
+/// elevated.
 fn schtasks() -> PathBuf {
     let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
     PathBuf::from(root).join("System32").join("schtasks.exe")
@@ -61,9 +61,9 @@ fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
-/// Task definition: run `exe` at logon of `user` with the highest
-/// privileges that user has, with none of the defaults that would stop a
-/// background tool (battery, 3-day time limit).
+/// Task definition: run `exe` at logon of `user` with the highest rights of
+/// that user. Without the defaults that stop a background tool (battery,
+/// 3-day time limit).
 pub fn task_xml(user: &str, exe: &str) -> String {
     let user = xml_escape(user);
     let exe = xml_escape(exe);
@@ -138,7 +138,7 @@ pub fn run_task() -> bool {
     schtasks_quiet(&["/Run", "/TN", TASK_NAME])
 }
 
-/// Runs schtasks elevated (UAC prompt unless already elevated) and waits.
+/// Runs schtasks elevated and waits. Shows a UAC prompt if not elevated.
 fn schtasks_elevated(params: &str) -> Result<(), String> {
     unsafe {
         let file = wide(&schtasks().to_string_lossy());
@@ -252,8 +252,8 @@ pub fn status() -> Kind {
     }
 }
 
-/// Turn autostart on in the requested variant; the other variant is removed
-/// so Pinfold never starts twice.
+/// Set autostart on in the given variant. Remove the other variant, thus
+/// Pinfold does not start two times.
 pub fn enable(elevated: bool) -> Result<Kind, String> {
     if elevated {
         create_task()?;

@@ -1,5 +1,5 @@
 //! Integration tests for the command line: the real binary, a private
-//! config directory, no processes pinned.
+//! config directory, no pinned processes.
 
 mod common;
 use common::Sandbox;
@@ -144,7 +144,7 @@ fn config_with_utf8_bom_is_accepted() {
 
 // --- shortcuts ---------------------------------------------------------------
 
-/// Create a real .lnk through the Windows Script Host, like Explorer does.
+/// Make a real .lnk with the Windows Script Host, as Explorer does.
 fn make_shortcut(lnk: &std::path::Path, target: &std::path::Path) {
     let script = format!(
         "$s = (New-Object -ComObject WScript.Shell).CreateShortcut('{}'); \

@@ -1,10 +1,10 @@
-//! `Pinfold.exe benchmark`: switch a running program between profiles,
-//! capture frame times with PresentMon in each, and compare.
+//! `Pinfold.exe benchmark`: moves a running program from profile to
+//! profile, records frame times with PresentMon and compares them.
 //!
-//! The switch goes through the rule in the config, so a running background
-//! instance applies it (and does not treat it as drift). Without a
-//! background instance the benchmark applies the affinity itself.
-//! Afterwards the rule is put back the way it was.
+//! The switch changes the rule in the config. Thus a running background
+//! instance applies it (and does not see it as drift). If there is no
+//! background instance, the benchmark applies the affinity. At the end,
+//! the rule is as before.
 
 use std::cell::Cell;
 use std::os::windows::process::CommandExt;
@@ -39,16 +39,16 @@ pub struct Options {
     pub settle: u32,
     pub countdown: u32,
     pub presentmon: Option<String>,
-    /// Capture only while the target is the window in front.
+    /// Capture only when the target is the window in front.
     pub focus: bool,
     /// Make the winner the rule without asking.
     pub apply: bool,
-    /// Started from the tray menu: own console window, wait before closing.
+    /// Started from the tray menu: new console window, wait before it closes.
     pub window: bool,
 }
 
 impl Options {
-    /// The command line that reproduces these options.
+    /// The command line for these options.
     pub fn to_args(&self) -> Vec<String> {
         let mut a = vec![self.target.clone()];
         if !self.profiles.is_empty() {
@@ -128,9 +128,9 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
     Ok(o)
 }
 
-/// Capture order: every profile once per round, and the order reversed in
-/// every second round, so that warm-up and slow changes in the scene do
-/// not favour whichever profile always comes first.
+/// Capture order: each profile one time in each round. Each second round
+/// uses the reverse order. Thus warm-up and slow scene changes do not
+/// help the profile that comes first.
 pub fn phases(profiles: &[String], rounds: u32) -> Vec<(u32, String)> {
     let mut out = Vec::new();
     for round in 1..=rounds {
@@ -143,7 +143,7 @@ pub fn phases(profiles: &[String], rounds: u32) -> Vec<(u32, String)> {
     out
 }
 
-/// "Cache" and "Frequency" when both exist, otherwise every profile.
+/// "Cache" and "Frequency" if both exist, else all profiles.
 pub fn default_profiles(cfg: &Config) -> Vec<String> {
     match (cfg.profile("Cache"), cfg.profile("Frequency")) {
         (Some(c), Some(f)) => vec![c.name.clone(), f.name.clone()],
@@ -156,9 +156,9 @@ fn is_presentmon(name: &str) -> bool {
     n.starts_with("presentmon") && (n.ends_with(".exe") || n.ends_with(".cmd"))
 }
 
-/// Explicit path first; then a PresentMon*.exe next to Pinfold.exe or in
-/// the config directory (release files carry a version in their name);
-/// then PresentMon.exe on PATH.
+/// First the given path. Then a PresentMon*.exe next to Pinfold.exe or in
+/// the config directory (release files have a version in the name). Then
+/// PresentMon.exe on PATH.
 pub fn find_presentmon(explicit: Option<&str>, search: &[PathBuf]) -> Result<PathBuf, String> {
     if let Some(p) = explicit {
         let path = PathBuf::from(p);
@@ -189,7 +189,7 @@ pub fn find_presentmon(explicit: Option<&str>, search: &[PathBuf]) -> Result<Pat
     Err(PRESENTMON_HELP.to_string())
 }
 
-/// What the benchmark tells the person running it: a console, or the tray.
+/// How the benchmark tells the user about its progress: console or tray.
 pub trait Ui {
     /// A line of progress (console output or the log).
     fn say(&self, line: &str);
@@ -200,15 +200,15 @@ pub trait Ui {
     fn progress(&self, _done: f64) {}
 }
 
-/// The player is in the game while the benchmark runs: sounds are the
-/// signals that reach them.
+/// During the benchmark, the player is in the game. Sounds are the
+/// signals that the player gets.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Sound {
     /// The first capture starts.
     Start,
-    /// The next profile is being captured.
+    /// The capture of the next profile starts.
     Switch,
-    /// Something needs attention (focus lost, failure).
+    /// A problem (focus lost, failure).
     Problem,
     Done,
 }
@@ -241,7 +241,7 @@ struct Run<'a> {
     topo: Topology,
     presentmon: PathBuf,
     out_dir: PathBuf,
-    /// A background instance applies config changes; otherwise we do.
+    /// If true, a background instance applies config changes. If false, we do.
     background: bool,
     /// Number of captures in the plan.
     steps: usize,
@@ -271,7 +271,7 @@ impl Run<'_> {
         }
     }
 
-    /// Sleep that a cancel ends early, with a countdown in the status.
+    /// Wait with a countdown in the status. A cancel stops the wait.
     fn pause(&self, secs: u32, status: &str) -> Result<(), Failure> {
         for left in (1..=secs).rev() {
             self.ui.status(&format!("{status} in {left} s"));
@@ -287,7 +287,7 @@ impl Run<'_> {
         pids_by_name(&self.opts.target).contains(&foreground_pid())
     }
 
-    /// Captures only count while the game is the window in front.
+    /// A capture counts only when the game is the window in front.
     fn wait_for_focus(&self) -> Result<(), Failure> {
         if !self.opts.focus || self.in_front() {
             return Ok(());
@@ -320,7 +320,7 @@ impl Run<'_> {
         self.cfg.rule_index(&self.opts.target).map(|i| self.cfg.rules[i].mode).unwrap_or_default()
     }
 
-    /// Point the rule at `profile` and wait until the running program has it.
+    /// Set the rule to `profile` and wait until the running program has it.
     fn switch(&mut self, profile: &str) -> Result<(), String> {
         let mask = self.mask_of(profile)?;
         self.cfg.upsert_rule(&self.opts.target, profile, None);
@@ -330,8 +330,8 @@ impl Run<'_> {
             self.apply_directly(mask, mode);
         }
         if mode == Mode::Cpusets {
-            // CPU Sets cannot be read back without opening the process for
-            // more rights than a query; give the engine one poll.
+            // To read CPU Sets, the process must be opened with more than
+            // query rights. Wait for one poll of the engine.
             std::thread::sleep(Duration::from_millis(self.cfg.poll_ms() as u64 + 500));
             return Ok(());
         }
@@ -370,9 +370,9 @@ impl Run<'_> {
         }
     }
 
-    /// Capture `profile` (already applied) while the game is in front. A
-    /// capture during which the game lost focus for more than a second is
-    /// thrown away and repeated.
+    /// Capture `profile` (already applied) when the game is in front. If
+    /// the game loses the focus for more than one second, discard the
+    /// capture and do it again.
     fn capture(
         &self,
         index: usize,
@@ -438,7 +438,7 @@ impl Run<'_> {
     }
 }
 
-/// Why a PresentMon run did not produce a capture.
+/// Why PresentMon did not make a capture.
 enum CaptureError {
     Failed { code: Option<i32>, output: String },
     Interrupted(Interrupt),
@@ -449,7 +449,7 @@ impl CaptureError {
         CaptureError::Failed { code: None, output: output.into() }
     }
 
-    /// PresentMon could not start its trace session for lack of rights.
+    /// PresentMon could not start its trace session: no rights.
     fn is_access_denied(&self) -> bool {
         matches!(self, CaptureError::Failed { output, .. }
             if output.to_lowercase().contains("access denied"))
@@ -472,17 +472,17 @@ impl CaptureError {
     }
 }
 
-/// One timed PresentMon capture into `csv`. Every program is captured and
-/// the target is picked out afterwards: that way a capture without the
-/// target still says who was presenting instead of producing no file.
-/// `watch` is asked ten times a second whether to stop early.
+/// One timed PresentMon capture into `csv`. The capture has all programs.
+/// The target is selected after the capture. Thus a capture without the
+/// target shows the programs with frames, and not only an empty file.
+/// `watch` is called ten times each second. It can stop the capture.
 fn presentmon_capture(
     presentmon: &Path,
     csv: &Path,
     seconds: u32,
     watch: &dyn Fn() -> Option<Interrupt>,
 ) -> Result<(), CaptureError> {
-    // PresentMon reports problems on stderr; keep it for the error message.
+    // PresentMon writes problems to stderr. Keep it for the error message.
     let err_path = csv.with_extension("presentmon.txt");
     let err_file =
         std::fs::File::create(&err_path).map_err(|e| CaptureError::failed(e.to_string()))?;
@@ -530,12 +530,12 @@ fn presentmon_capture(
     }
 }
 
-/// Why the benchmark did not produce a report.
+/// Why the benchmark did not make a report.
 pub enum Failure {
-    /// PresentMon needs rights this process does not have; running the
-    /// benchmark elevated will help.
+    /// PresentMon needs rights that this process does not have. Run the
+    /// benchmark elevated.
     NeedsElevation,
-    /// Stopped on request; the rule is as before.
+    /// Stopped by the user. The rule is as before.
     Cancelled,
     Message(String),
 }
@@ -553,7 +553,7 @@ impl From<&str> for Failure {
 }
 
 fn restore(dir: &Path, target: &str, original: Option<Rule>, reset: Option<u64>) {
-    // Re-read: only our rule is touched, whatever else changed stays.
+    // Read again: change only our rule, keep all other changes.
     if let Ok(mut cfg) = config::load(dir) {
         if let Some(i) = cfg.rule_index(target) {
             match original {
@@ -565,7 +565,7 @@ fn restore(dir: &Path, target: &str, original: Option<Rule>, reset: Option<u64>)
             let _ = config::save(dir, &cfg);
         }
     }
-    // Nobody else resets a program that had no rule and no engine watching.
+    // If there was no rule and no engine, nothing else resets the program.
     if let Some(all) = reset {
         let mut sys = RealSystem;
         for pid in pids_by_name(target) {
@@ -578,7 +578,7 @@ fn restore(dir: &Path, target: &str, original: Option<Rule>, reset: Option<u64>)
     }
 }
 
-/// The profiles to compare, checked against the config.
+/// The profiles to compare, after a check against the config.
 pub fn chosen_profiles(opts: &Options, cfg: &Config) -> Result<Vec<String>, String> {
     let profiles: Vec<String> = if opts.profiles.is_empty() {
         default_profiles(cfg)
@@ -594,8 +594,8 @@ pub fn chosen_profiles(opts: &Options, cfg: &Config) -> Result<Vec<String>, Stri
     Ok(profiles)
 }
 
-/// Run the benchmark. `cancel` stops it at the next check (ten times a
-/// second); the rule is put back in every case.
+/// Run the benchmark. `cancel` stops it at the next check (ten times each
+/// second). The rule is always put back.
 pub fn run(opts: &Options, ui: &dyn Ui, cancel: &AtomicBool) -> Result<Outcome, Failure> {
     let dir = config::dir();
     let cfg = config::load(&dir)?;
@@ -617,8 +617,8 @@ pub fn run(opts: &Options, ui: &dyn Ui, cancel: &AtomicBool) -> Result<Outcome, 
     std::fs::create_dir_all(&out_dir)
         .map_err(|e| format!("cannot create {}: {e}", out_dir.display()))?;
 
-    // One-second trial capture before anyone switches to the game: finds
-    // missing rights and other PresentMon problems while they are cheap.
+    // One-second test capture before the user goes to the game. It finds
+    // missing rights and other PresentMon problems early.
     ui.status("checking PresentMon");
     let trial = out_dir.join("trial.csv");
     let checked = presentmon_capture(&presentmon, &trial, 1, &|| {
@@ -666,8 +666,8 @@ pub fn run(opts: &Options, ui: &dyn Ui, cancel: &AtomicBool) -> Result<Outcome, 
         profiles.iter().map(|p| (p.clone(), Vec::new())).collect();
     let mut rounds_text = String::new();
     let mut per_round: Vec<(u32, String, f64)> = Vec::new();
-    // GPU busy and total frame time per profile; None once a capture
-    // lacks the GPU column.
+    // GPU busy time and total frame time for each profile. None if a
+    // capture has no GPU column.
     let mut gpu: Vec<(String, Option<(f64, f64)>)> =
         profiles.iter().map(|p| (p.clone(), Some((0.0, 0.0)))).collect();
     let mut outcome = Ok(());
@@ -774,17 +774,17 @@ pub struct Outcome {
     /// The full report, as printed and saved.
     pub report: String,
     pub verdict: frametime::Verdict,
-    /// One line per profile with the main numbers.
+    /// One line for each profile with the main numbers.
     pub summary: String,
-    /// How busy the GPU was, and whether that hid the CPU placement.
+    /// The GPU load, and if it hid the effect of the CPU placement.
     pub gpu_note: Option<String>,
-    /// The profile the rule had before the benchmark, if there was a rule.
+    /// The profile of the rule before the benchmark, if there was a rule.
     pub current: Option<String>,
     pub report_path: PathBuf,
 }
 
 impl Outcome {
-    /// The winner, when it is not already the rule's profile.
+    /// The winner, if it is not the profile of the rule.
     pub fn better_profile(&self) -> Option<&str> {
         let w = self.verdict.winner.as_deref()?;
         match &self.current {
@@ -794,7 +794,7 @@ impl Outcome {
     }
 }
 
-/// Make `profile` the rule for `target` (the benchmark's result).
+/// Make `profile` the rule for `target` (the result of the benchmark).
 pub fn apply(target: &str, profile: &str) -> Result<(), String> {
     let dir = config::dir();
     let mut cfg = config::load(&dir)?;

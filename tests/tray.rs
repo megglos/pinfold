@@ -1,5 +1,5 @@
-//! The background (tray) instance: started for real, in a private config
-//! directory. The menu itself needs a person and is not covered here.
+//! The background (tray) instance: a real start in a private config
+//! directory. The menu needs a person. These tests do not include it.
 
 mod common;
 use common::{wait_for, Sandbox, TIMEOUT};
@@ -18,7 +18,7 @@ fn tray_instance_pins_and_quits_on_request() {
     let mut tray = s.start_tray();
     wait_for("tray start", TIMEOUT, || s.log().contains("started"));
 
-    // The tray instance drives the engine from its window timer.
+    // The window timer of the tray instance runs the engine.
     let p = target.start();
     wait_for("pin", TIMEOUT, || p.affinity() == 1);
 
@@ -27,7 +27,7 @@ fn tray_instance_pins_and_quits_on_request() {
     assert_eq!(status.code(), Some(0));
     assert!(s.log().trim_end().ends_with("exit"), "{}", s.log());
 
-    // Quitting leaves the pin in place.
+    // After quit, the pin stays.
     assert_eq!(p.affinity(), 1);
 }
 

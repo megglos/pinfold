@@ -1,6 +1,6 @@
-//! Tray icon and menu. One thread: the message loop also drives the
-//! engine through a window timer, so there is no shared state to lock.
-//! The menu is built when opened; nothing is refreshed in the background.
+//! Tray icon and menu. One thread: a window timer in the message loop also
+//! runs the engine, thus there is no shared state to lock. The menu is
+//! made when the user opens it. There are no background updates.
 
 use std::cell::{Cell, RefCell};
 use std::ptr::{null, null_mut};
@@ -56,7 +56,7 @@ static QUIT_MESSAGE: AtomicU32 = AtomicU32::new(0);
 const WINDOW_CLASS: &str = "PinfoldTray";
 
 enum Action {
-    /// Create or update the file-name rule for this executable path.
+    /// Make or update the file-name rule for this executable path.
     Assign {
         path: String,
         profile: String,
@@ -119,7 +119,7 @@ impl Menu {
     }
 }
 
-/// Shows the menu at the cursor and returns the chosen action.
+/// Shows the menu at the cursor and returns the selected action.
 unsafe fn track(hwnd: HWND, hmenu: HMENU, mut m: Menu) -> Action {
     let mut pt = POINT { x: 0, y: 0 };
     GetCursorPos(&mut pt);
@@ -142,8 +142,8 @@ unsafe fn track(hwnd: HWND, hmenu: HMENU, mut m: Menu) -> Action {
     }
 }
 
-/// Popup with the profile list. Used by "Add program..." and by the
-/// short-lived drop instance.
+/// Popup with the profiles. For "Add program..." and for the short drop
+/// instance.
 pub unsafe fn pick_profile(hwnd: HWND, exe_name: &str, profiles: &[String]) -> Option<String> {
     let mut m = Menu { actions: Vec::new() };
     let menu = CreatePopupMenu();
@@ -158,7 +158,7 @@ pub unsafe fn pick_profile(hwnd: HWND, exe_name: &str, profiles: &[String]) -> O
     }
 }
 
-/// Hidden helper window for instances that only need a popup menu.
+/// Hidden helper window for instances that need only a popup menu.
 pub unsafe fn hidden_window() -> HWND {
     CreateWindowExW(
         0,
@@ -191,11 +191,11 @@ unsafe extern "system" fn enum_windows_cb(hwnd: HWND, lparam: LPARAM) -> i32 {
     1
 }
 
-/// Order of the Assign list. `z_order` holds (path, start time) of the
-/// processes owning visible windows, topmost window first. The program the
-/// user was just using comes first: the topmost one that is not the shell
-/// (clicking the tray icon puts the taskbar in front). The rest follows,
-/// most recently started first, one entry per executable path.
+/// Order of the Assign list. `z_order` has (path, start time) of the
+/// processes with visible windows, topmost window first. First comes the
+/// program that the user used last: the topmost one that is not the shell
+/// (a click on the tray icon puts the taskbar in front). Then the others,
+/// newest first, one entry for each executable path.
 fn assign_order(z_order: Vec<(String, u64)>, shell: Option<&str>, limit: usize) -> Vec<String> {
     let is_shell = |path: &str| shell.is_some_and(|s| s.eq_ignore_ascii_case(path));
     let front = z_order.iter().find(|(path, _)| !is_shell(path)).map(|(path, _)| path.clone());
@@ -211,9 +211,9 @@ fn assign_order(z_order: Vec<(String, u64)>, shell: Option<&str>, limit: usize) 
     out
 }
 
-/// Processes that own a visible top-level window, in Assign order.
-/// Computed when the menu opens; nothing tracks the foreground window in
-/// the background (EnumWindows reports windows in Z-order).
+/// Processes with a visible top-level window, in Assign order. Calculated
+/// when the menu opens. Nothing monitors the foreground window in the
+/// background (EnumWindows gives windows in Z-order).
 fn windowed_processes() -> Vec<String> {
     let mut pids: Vec<u32> = Vec::new();
     unsafe { EnumWindows(Some(enum_windows_cb), &mut pids as *mut Vec<u32> as LPARAM) };
@@ -296,7 +296,7 @@ fn build_menu(e: &Engine) -> (HMENU, Menu) {
         m.item(root, "Add program...", false, Action::AddProgram);
         m.sep(root);
 
-        // Benchmark > comparisons, grouped by running program with a rule
+        // Benchmark > comparisons for each running program with a rule
         if !running {
             let names: Vec<String> = e.cfg.profiles.iter().map(|p| p.name.clone()).collect();
             let targets: Vec<&config::Rule> = (0..e.cfg.rules.len())
@@ -347,8 +347,8 @@ fn build_menu(e: &Engine) -> (HMENU, Menu) {
 }
 
 unsafe fn show_menu(hwnd: HWND) {
-    // The borrow must not be held while the menu is open: the poll timer
-    // keeps firing inside the menu's modal loop.
+    // Do not keep the borrow while the menu is open: the poll timer
+    // continues in the modal loop of the menu.
     let built = ENGINE.with(|e| e.borrow().as_ref().map(build_menu));
     let Some((hmenu, menu)) = built else { return };
     let action = track(hwnd, hmenu, menu);
@@ -448,18 +448,19 @@ unsafe fn add_program(hwnd: HWND) {
 
 // --- Benchmark without a window ----------------------------------------------
 //
-// The benchmark runs on its own thread in this process: it has this
-// instance's elevation (PresentMon needs it), and the engine on the main
-// thread applies each profile switch. Progress goes to the tooltip and the
-// log, signals are sounds, the result is a notification and a dialog.
+// The benchmark runs on a separate thread in this process. Thus it has the
+// elevation of this instance (PresentMon needs it), and the engine on the
+// main thread applies each profile switch. The tooltip, the icon and the
+// log show the progress. Sounds give signals. A notification and a dialog
+// show the result.
 
-/// Set while a benchmark runs; storing true stops it.
+/// Set while a benchmark runs. Store true to stop it.
 static BENCH_CANCEL: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
 /// Progress for the tooltip.
 static BENCH_STATUS: Mutex<Option<String>> = Mutex::new(None);
 /// Share of the captures done, in thousandths.
 static BENCH_PROGRESS: AtomicU32 = AtomicU32::new(0);
-/// A notification for the main thread to show (title, text).
+/// A notification for the main thread (title, text).
 static BENCH_NOTE: Mutex<Option<(String, String)>> = Mutex::new(None);
 const WM_BENCH_STATUS: u32 = WM_APP + 2;
 const WM_BENCH_NOTE: u32 = WM_APP + 3;
@@ -468,8 +469,8 @@ fn bench_running() -> bool {
     BENCH_CANCEL.lock().map(|c| c.is_some()).unwrap_or(false)
 }
 
-/// Comparisons offered for a rule: Cache against Frequency, the rule's
-/// profile against each other one, and all profiles together.
+/// Comparisons for a rule: Cache and Frequency, the profile of the rule and
+/// each other profile, and all profiles.
 fn benchmark_choices(profiles: &[String], current: &str) -> Vec<Vec<String>> {
     let find = |name: &str| profiles.iter().find(|p| p.eq_ignore_ascii_case(name)).cloned();
     let mut out: Vec<Vec<String>> = Vec::new();
@@ -505,7 +506,7 @@ fn choice_label(choice: &[String], all: usize) -> String {
     }
 }
 
-/// The report of the most recent benchmark.
+/// The report of the last benchmark.
 fn last_report() -> Option<std::path::PathBuf> {
     let dir = config::dir().join("benchmarks");
     std::fs::read_dir(dir)
@@ -572,9 +573,9 @@ const BUTTON_APPLY: i32 = 100;
 const BUTTON_REPORT: i32 = 101;
 const BUTTON_CLOSE: i32 = 102;
 
-/// The benchmark result with buttons to open the report and, when another
-/// profile won, to make it the rule. "Open report" leaves the dialog open.
-/// Returns true when the winner should become the rule.
+/// The benchmark result. One button opens the report and the dialog stays
+/// open. If another profile won, one button makes it the rule. Returns true
+/// if the winner must become the rule.
 fn result_dialog(heading: &str, text: &str, report: &str, apply: Option<(&str, &str)>) -> bool {
     use windows_sys::Win32::UI::Controls::{
         TaskDialogIndirect, TASKDIALOGCONFIG, TASKDIALOG_BUTTON, TDF_ALLOW_DIALOG_CANCELLATION,
@@ -631,7 +632,7 @@ fn result_dialog(heading: &str, text: &str, report: &str, apply: Option<(&str, &
         cfg.pfCallback = Some(callback);
         cfg.lpCallbackData = &report as *const String as isize;
         if TaskDialogIndirect(&cfg, &mut pressed, null_mut(), null_mut()) < 0 {
-            // No task dialog: fall back to a plain message box.
+            // No task dialog: use a message box.
             let mut plain = format!("{heading}\n\n{text}\n\nReport: {report}");
             return match apply {
                 Some((winner, _)) => {
@@ -684,8 +685,8 @@ fn start_benchmark(hwnd: HWND, target: String, profiles: Vec<String>) {
     });
 }
 
-/// Tell the result. Runs on the benchmark thread: the dialogs do not block
-/// the tray.
+/// Show the result. Runs on the benchmark thread, thus the dialogs do not
+/// block the tray.
 fn finish_benchmark(hwnd: usize, target: &str, result: Result<bench::Outcome, bench::Failure>) {
     match result {
         Ok(outcome) => {
@@ -735,7 +736,7 @@ fn finish_benchmark(hwnd: usize, target: &str, result: Result<bench::Outcome, be
                     .map_err(|e| e.to_string())
                     .and_then(|exe| crate::win::launch_elevated(&exe, &[]));
                 match started {
-                    // The new instance waits for this one to exit.
+                    // The new instance waits until this one stops.
                     Ok(()) => unsafe {
                         PostMessageW(hwnd as HWND, quit_message(), 0, 0);
                     },
@@ -759,7 +760,7 @@ fn stop_benchmark() {
     }
 }
 
-/// Copy text into a fixed-size UTF-16 field, cut to fit with its NUL.
+/// Copy text into a UTF-16 field of fixed size. Cut it to fit with its NUL.
 fn fill(field: &mut [u16], text: &str) {
     let mut w: Vec<u16> = text.encode_utf16().take(field.len() - 1).collect();
     w.push(0);
@@ -808,8 +809,8 @@ unsafe fn toggle_autostart(hwnd: HWND) {
         Err(e) => message_box(&e),
         Ok(kind) => {
             crate::log::log(&format!("autostart {}", kind.describe()));
-            // Switch to the elevated instance right away instead of at the
-            // next logon: start the task and make room for it.
+            // Change to the elevated instance now, not at the next logon:
+            // start the task and stop this instance.
             if kind == Kind::Elevated && !crate::diag::is_elevated() && autostart::run_task() {
                 DestroyWindow(hwnd);
             }
@@ -819,8 +820,8 @@ unsafe fn toggle_autostart(hwnd: HWND) {
 
 // --- Single instance and quit -----------------------------------------------
 
-/// Distinguishes instances that use different config directories (tests);
-/// empty for the normal instance.
+/// Identifies instances with different config directories (tests). Empty
+/// for the normal instance.
 fn instance_key() -> String {
     match std::env::var("PINFOLD_DIR") {
         Ok(dir) => {
@@ -846,9 +847,9 @@ fn quit_message() -> u32 {
     unsafe { RegisterWindowMessageW(wide("Pinfold.Quit").as_ptr()) }
 }
 
-/// Ask the background instance to exit and wait until it is gone.
-/// Works from an unelevated process even when the instance is elevated.
-/// Returns false when it is still running after the timeout.
+/// Tell the background instance to stop and wait until it stops. Works
+/// from a process without elevation also if the instance is elevated.
+/// Returns false if it still runs after the timeout.
 pub fn quit_running_instance() -> bool {
     unsafe {
         let hwnd = find_instance();
@@ -870,14 +871,14 @@ pub fn is_running() -> bool {
     unsafe { !find_instance().is_null() }
 }
 
-/// Take the single-instance mutex. A previous instance that is just
-/// exiting (reinstall, switch to the elevated task) gets a few seconds.
+/// Get the single-instance mutex. A previous instance that stops now
+/// (reinstall, change to the elevated task) gets some seconds.
 unsafe fn acquire_single_instance() -> bool {
     let name = wide(&format!("Local\\Pinfold.Background{}", instance_key()));
     for _ in 0..25 {
         let handle = CreateMutexW(null(), 0, name.as_ptr());
         if !handle.is_null() && GetLastError() != ERROR_ALREADY_EXISTS {
-            return true; // kept open for the lifetime of the process
+            return true; // stays open until the process stops
         }
         if !handle.is_null() {
             CloseHandle(handle);
@@ -898,7 +899,7 @@ unsafe fn update_icon(hwnd: HWND, message: u32) {
     nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     nid.uCallbackMessage = WM_TRAY;
     let status = BENCH_STATUS.lock().ok().and_then(|s| s.clone());
-    // While a benchmark runs: a ring that fills with its progress.
+    // While a benchmark runs: a ring that fills with the progress.
     let ring = match status {
         Some(_) => progress_icon(BENCH_PROGRESS.load(Ordering::Relaxed) as f64 / 1000.0),
         None => null_mut(),
@@ -927,7 +928,7 @@ unsafe fn update_icon(hwnd: HWND, message: u32) {
     };
     fill(&mut nid.szTip, &tip);
     Shell_NotifyIconW(message, &nid);
-    // The shell keeps its own copy: the previous ring can go.
+    // The shell keeps its own copy. Destroy the previous ring.
     let old = RING_ICON.with(|r| r.replace(ring));
     if !old.is_null() {
         DestroyIcon(old);
@@ -938,12 +939,12 @@ thread_local! {
     static RING_ICON: Cell<HICON> = const { Cell::new(null_mut()) };
 }
 
-/// Pixels (ARGB, rows from the top) of a progress ring: a track with the
-/// done part drawn clockwise from 12 o'clock, and a dot in the middle.
+/// Pixels (ARGB, rows from the top) of a progress ring: a track, the done
+/// part clockwise from 12 o'clock, and a dot in the middle.
 fn ring_pixels(size: usize, done: f64) -> Vec<u32> {
     const LIT: u32 = 0x1E90FF; // blue
     const TRACK: u32 = 0x9A9A9A; // grey, half transparent
-    const SAMPLES: usize = 4; // per axis, for smooth edges
+    const SAMPLES: usize = 4; // for each axis, for smooth edges
     let c = size as f64 / 2.0;
     let (outer, inner, dot) = (c - 0.5, c * 0.58, c * 0.28);
     let mut out = Vec::with_capacity(size * size);
@@ -982,7 +983,7 @@ fn ring_pixels(size: usize, done: f64) -> Vec<u32> {
     out
 }
 
-/// A tray icon of the progress ring; null if it cannot be made.
+/// A tray icon with the progress ring. Null if it fails.
 unsafe fn progress_icon(done: f64) -> HICON {
     let size = GetSystemMetrics(SM_CXSMICON).max(16) as usize;
     let pixels = ring_pixels(size, done);
@@ -1032,7 +1033,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_DESTROY => {
             KillTimer(hwnd, TIMER_ID);
-            // Put the rule back before the process ends.
+            // Put the rule back before the process stops.
             stop_benchmark();
             for _ in 0..30 {
                 if !bench_running() {
@@ -1054,7 +1055,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 DestroyWindow(hwnd);
                 return 0;
             }
-            // Explorer restarted: the icon has to be added again.
+            // Explorer started again: add the icon again.
             if msg != 0 && msg == TASKBAR_CREATED.load(Ordering::Relaxed) {
                 update_icon(hwnd, NIM_ADD);
                 return 0;
@@ -1064,13 +1065,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     }
 }
 
-/// Background instance: tray icon plus engine. Returns the exit code.
+/// Background instance: tray icon and engine. Returns the exit code.
 pub fn run() -> i32 {
     unsafe {
-        // Started by hand while the elevated logon task exists: hand over to
-        // the task, so Pinfold always runs with the rights it was set up
-        // with. (Not for instances with their own config directory, and not
-        // when the task could not run elevated anyway.)
+        // Started manually, and the elevated logon task exists: start the
+        // task and stop. Thus Pinfold always runs with the rights of its
+        // setup. (Not for instances with their own config directory, and
+        // not if the task cannot run elevated.)
         if instance_key().is_empty()
             && crate::diag::has_elevated_twin()
             && autostart::task_exists()
@@ -1094,8 +1095,8 @@ pub fn run() -> i32 {
         wc.hInstance = hinstance;
         wc.lpszClassName = class.as_ptr();
         RegisterClassW(&wc);
-        // A regular (never shown) top-level window, not a message-only one,
-        // so that the TaskbarCreated broadcast arrives.
+        // A normal top-level window (never shown), not a message-only
+        // window. Only then does the TaskbarCreated broadcast arrive.
         let hwnd = CreateWindowExW(
             0,
             class.as_ptr(),
@@ -1115,7 +1116,7 @@ pub fn run() -> i32 {
         }
         TASKBAR_CREATED
             .store(RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()), Ordering::Relaxed);
-        // Let an unelevated `Pinfold.exe quit` reach an elevated instance.
+        // Let `Pinfold.exe quit` without elevation stop an elevated instance.
         let quit = quit_message();
         QUIT_MESSAGE.store(quit, Ordering::Relaxed);
         ChangeWindowMessageFilterEx(hwnd, quit, MSGFLT_ALLOW, null_mut());
@@ -1155,7 +1156,7 @@ mod tests {
 
     #[test]
     fn shell_on_top_is_skipped_as_foreground() {
-        // After a click on the tray icon the taskbar (explorer) is topmost.
+        // After a click on the tray icon, the taskbar (explorer) is topmost.
         let procs = z(&[(SHELL, 10), ("D:\\game.exe", 100), ("C:\\newer.exe", 300)]);
         let order = assign_order(procs, Some("c:\\windows\\EXPLORER.EXE"), 30);
         assert_eq!(order, ["D:\\game.exe", "C:\\newer.exe", SHELL]);
@@ -1179,7 +1180,7 @@ mod tests {
         let labels: Vec<String> = choices.iter().map(|c| super::choice_label(c, 3)).collect();
         assert_eq!(labels, ["Cache vs Frequency", "Cache vs All cores", "All 3 profiles"]);
 
-        // A rule on another profile is compared against the rest.
+        // A rule with another profile: compare it with each other profile.
         let choices = super::benchmark_choices(&profiles, "All cores");
         let labels: Vec<String> = choices.iter().map(|c| super::choice_label(c, 3)).collect();
         assert_eq!(
@@ -1198,7 +1199,7 @@ mod tests {
         let choices = super::benchmark_choices(&names(&["Fast", "Slow"]), "Slow");
         assert_eq!(choices, [names(&["Slow", "Fast"])]);
         assert!(super::benchmark_choices(&names(&["Only"]), "Only").is_empty());
-        // A rule whose profile is gone still offers all profiles.
+        // If the profile of a rule does not exist, offer all profiles.
         let choices = super::benchmark_choices(&names(&["A", "B", "C"]), "Gone");
         assert_eq!(choices, [names(&["A", "B", "C"])]);
     }

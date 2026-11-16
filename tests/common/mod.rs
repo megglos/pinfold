@@ -1,6 +1,6 @@
 //! Shared helpers for the integration tests. They run the real
-//! `Pinfold.exe` with `PINFOLD_DIR` pointing at a private directory, so the
-//! user's own config and a running Pinfold are never touched.
+//! `Pinfold.exe` with `PINFOLD_DIR` set to a private directory. Thus they
+//! do not touch the config of the user or a running Pinfold.
 
 #![allow(dead_code)]
 
@@ -22,7 +22,7 @@ fn unique() -> String {
     format!("{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
-/// A private config directory, removed on drop.
+/// A private config directory. Removed on drop.
 pub struct Sandbox {
     pub dir: PathBuf,
 }
@@ -32,8 +32,8 @@ impl Sandbox {
         let dir = std::env::temp_dir().join(format!("pinfold-it-{}", unique()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        // Resolve 8.3 short names (common in CI temp paths) so full-path
-        // rules compare against the same spelling Windows reports.
+        // Change 8.3 short names (frequent in CI temp paths) to long names.
+        // Full-path rules then compare with the names that Windows gives.
         let long = std::fs::canonicalize(&dir).unwrap();
         let text = long.to_string_lossy();
         let dir = PathBuf::from(text.strip_prefix(r"\\?\").unwrap_or(&text));
@@ -46,18 +46,18 @@ impl Sandbox {
         c
     }
 
-    /// Run a short-lived command and collect its output.
+    /// Run a short command and get its output.
     pub fn run(&self, args: &[&str]) -> Output {
         self.command(args).output().expect("cannot run Pinfold.exe")
     }
 
-    /// Start a command without waiting; stdout is collected.
-    #[allow(dead_code)] // not every test binary uses it
+    /// Start a command and do not wait. Keeps stdout.
+    #[allow(dead_code)] // some test binaries do not use it
     pub fn spawn(&self, args: &[&str]) -> std::process::Child {
         self.command(args).stdout(Stdio::piped()).spawn().expect("cannot run Pinfold.exe")
     }
 
-    /// Like `run`, but returns stdout and asserts the exit code.
+    /// As `run`, but returns stdout and checks the exit code.
     pub fn ok(&self, args: &[&str]) -> String {
         let out = self.run(args);
         let text = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -71,8 +71,8 @@ impl Sandbox {
     }
 
     /// Start the background instance with tray icon. Its single-instance
-    /// lock and window are keyed by the config directory, so it runs next
-    /// to an installed Pinfold without either noticing the other.
+    /// lock and window use the config directory as key. Thus it runs next
+    /// to an installed Pinfold, and the two do not see each other.
     pub fn start_tray(&self) -> Proc {
         Proc(self.command(&[]).stdout(Stdio::null()).spawn().expect("cannot start tray instance"))
     }
@@ -89,8 +89,8 @@ impl Sandbox {
         std::fs::read_to_string(self.dir.join("pinfold.log")).unwrap_or_default()
     }
 
-    /// Write a config with a one-cpu profile "One" (cpu 0 exists on every
-    /// machine, including small CI runners) and a fast poll.
+    /// Write a config with a fast poll and a profile "One" with one cpu.
+    /// Cpu 0 exists on all machines, also on small CI runners.
     pub fn write_config(&self, rules_json: &str) {
         let text = format!(
             r#"{{
@@ -102,9 +102,9 @@ impl Sandbox {
         std::fs::write(self.config_path(), text).unwrap();
     }
 
-    /// Copy of an idle program under a unique file name, so that rules in
-    /// one test can never match a process of another test. The program is
-    /// Pinfold itself, idling in console mode with an empty private config.
+    /// Copy of an idle program with a unique file name. Thus the rules of
+    /// one test cannot match a process of another test. The program is
+    /// Pinfold, idle in console mode with an empty private config.
     pub fn target(&self) -> Target {
         let name = format!("pf-target-{}.exe", unique());
         let dir = self.dir.join("target");
@@ -140,7 +140,7 @@ impl Target {
     }
 }
 
-/// A child process that is killed on drop.
+/// A child process. Killed on drop.
 pub struct Proc(pub Child);
 
 impl Proc {
@@ -185,7 +185,7 @@ impl Drop for Proc {
     }
 }
 
-/// Poll `cond` until it holds or the timeout expires.
+/// Poll `cond` until it is true or the timeout expires.
 pub fn wait_for(what: &str, timeout: Duration, mut cond: impl FnMut() -> bool) {
     let start = Instant::now();
     while !cond() {
@@ -196,8 +196,8 @@ pub fn wait_for(what: &str, timeout: Duration, mut cond: impl FnMut() -> bool) {
 
 pub const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// True when the machine has more than one logical cpu; pinning to cpu 0
-/// cannot be told apart from "all cpus" otherwise.
+/// True if the machine has more than one logical cpu. If not, a pin to
+/// cpu 0 is the same as "all cpus".
 pub fn multi_cpu(p: &Proc) -> bool {
     p.system_mask().count_ones() > 1
 }

@@ -1,6 +1,6 @@
-// Embeds the icons and version info into the executable.
-// Icon id 1 is the application icon (lowest id, so Explorer shows it),
-// id 2 is the tray icon while paused.
+// Puts the icons, the manifest and the version data into the executable.
+// Icon 1 is the application icon (Explorer shows the lowest id).
+// Icon 2 is the tray icon during a pause.
 
 fn main() {
     println!("cargo:rerun-if-changed=assets/pinfold.ico");

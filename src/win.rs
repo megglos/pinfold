@@ -24,9 +24,9 @@ pub fn from_wide(buf: &[u16]) -> String {
     String::from_utf16_lossy(&buf[..len])
 }
 
-/// The binary uses the GUI subsystem so the tray instance never flashes a
-/// console. For command-line use, attach to the parent's console unless
-/// stdout is already redirected (pipe or file).
+/// The binary uses the GUI subsystem, thus the tray instance shows no
+/// console. On the command line, use the console of the parent, but not if
+/// stdout goes to a pipe or a file.
 pub fn console_init() {
     unsafe {
         let h = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -52,8 +52,8 @@ pub fn console_init() {
     }
 }
 
-/// Open an own console window (for a command started from the tray menu,
-/// where there is no parent console) and connect the standard handles.
+/// Open a new console window and connect the standard handles. For
+/// commands from the tray menu, which have no parent console.
 pub fn console_window(title: &str) {
     use windows_sys::Win32::System::Console::SetConsoleTitleW;
     unsafe {
@@ -95,7 +95,7 @@ pub fn quote_arg(arg: &str) -> String {
         match c {
             '\\' => backslashes += 1,
             '"' => {
-                // Backslashes before a quote are doubled, the quote escaped.
+                // Double the backslashes before a quote and escape the quote.
                 out.push_str(&"\\".repeat(backslashes * 2 + 1));
                 backslashes = 0;
                 out.push('"');
@@ -110,7 +110,7 @@ pub fn quote_arg(arg: &str) -> String {
             out.push(c);
         }
     }
-    // Backslashes before the closing quote are doubled as well.
+    // Also double the backslashes before the closing quote.
     out.push_str(&"\\".repeat(backslashes * 2));
     out.push('"');
     out
@@ -131,7 +131,7 @@ pub fn launch_elevated(exe: &std::path::Path, args: &[String]) -> Result<(), Str
             1, // SW_SHOWNORMAL
         )
     };
-    // ShellExecute reports success as a value above 32.
+    // ShellExecute returns a value above 32 on success.
     if result as usize > 32 {
         Ok(())
     } else if unsafe { GetLastError() } == 1223 {
@@ -148,7 +148,7 @@ pub fn wait_for_enter() {
     let _ = std::io::stdin().read_line(&mut line);
 }
 
-/// Print a line to stdout, ignoring a missing or broken stdout.
+/// Print a line to stdout. Ignore a missing or broken stdout.
 pub fn say(s: &str) {
     use std::io::Write;
     let _ = writeln!(std::io::stdout(), "{s}");

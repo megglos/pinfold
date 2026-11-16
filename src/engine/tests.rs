@@ -1,5 +1,5 @@
-//! Engine tests against a fake system: no real processes are touched.
-//! Each test gets its own config directory under the temp dir.
+//! Engine tests with a fake system. They touch no real process.
+//! Each test has its own config directory in the temp directory.
 
 use super::*;
 use crate::config::{Profile, Rule};
@@ -110,7 +110,7 @@ impl System for Fake {
     }
 }
 
-/// A 9950X3D-like topology: 32 logical cpus, V-Cache on 0-15.
+/// A topology as on a 9950X3D: 32 logical cpus, V-Cache on 0-15.
 fn topo() -> Topology {
     Topology {
         all_mask: ALL,
@@ -128,7 +128,7 @@ fn rule(pattern: &str, profile: &str) -> Rule {
     Rule { pattern: pattern.into(), profile: profile.into(), mode: Mode::Affinity, enforce: true }
 }
 
-/// Temp config directory, removed on drop.
+/// Temporary config directory. Removed on drop.
 struct Dir(PathBuf);
 
 impl Dir {
@@ -157,8 +157,8 @@ impl Dir {
         std::fs::create_dir_all(&self.0).unwrap();
         self.write_with(|| std::fs::write(config::path(&self.0), text).unwrap());
     }
-    /// File times have coarse resolution: repeat the write until the
-    /// modification time differs from the previous one, as a real edit would.
+    /// File times are not precise. Write again until the modification time
+    /// changes, as for a real edit.
     fn write_with(&self, write: impl Fn()) {
         let before = config::mtime(&self.0);
         loop {
@@ -254,7 +254,7 @@ fn rule_with_unknown_profile_is_ignored_and_logged() {
     assert_eq!(e.sys.proc(11).affinity, CACHE);
 }
 
-// --- applying ----------------------------------------------------------------
+// --- apply -------------------------------------------------------------------
 
 #[test]
 fn applies_to_matching_new_process_only() {
@@ -504,8 +504,8 @@ fn reused_pid_is_matched_as_a_new_process() {
 
 #[test]
 fn pid_of_a_denied_process_reused_within_one_poll_is_noticed() {
-    // A denied process has no open handle, so nothing stops Windows from
-    // giving its PID to a new process between two polls (F6).
+    // A denied process has no open handle. Thus Windows can give its PID
+    // to a new process between two polls (F6).
     let dir = Dir::new();
     let mut e = engine(&dir, vec![rule("game.exe", "Cache")]);
     e.sys.spawn(10, "D:\\game.exe");
@@ -514,7 +514,7 @@ fn pid_of_a_denied_process_reused_within_one_poll_is_noticed() {
     assert_eq!(e.rule_status(0), (State::Denied, 1));
 
     e.sys.kill(10);
-    e.sys.spawn(10, "D:\\game.exe"); // same PID, new process, can be opened
+    e.sys.spawn(10, "D:\\game.exe"); // same PID, new process, can open
     e.tick();
     assert_eq!(e.sys.proc(10).affinity, CACHE);
     assert_eq!(e.rule_status(0), (State::Ok, 1));

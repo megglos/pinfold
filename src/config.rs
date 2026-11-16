@@ -62,8 +62,8 @@ pub struct Rule {
 pub struct Config {
     #[serde(default = "default_poll")]
     pub poll_interval_ms: u32,
-    /// "Start with Windows" uses an elevated Task Scheduler logon task
-    /// (true, default) or the unelevated HKCU Run key (false).
+    /// "Start with Windows": true (default) uses an elevated logon task,
+    /// false uses the HKCU Run key without elevation.
     #[serde(default = "default_true")]
     pub elevated_autostart: bool,
     /// Path of the PresentMon console application, for `benchmark`.
@@ -121,7 +121,7 @@ impl Config {
     }
 }
 
-/// `%AppData%\Pinfold`, or `PINFOLD_DIR` when set (used for testing).
+/// `%AppData%\Pinfold`, or `PINFOLD_DIR` if set (for tests).
 pub fn dir() -> PathBuf {
     if let Some(d) = std::env::var_os("PINFOLD_DIR") {
         return PathBuf::from(d);
@@ -145,14 +145,14 @@ pub fn mtime(dir: &Path) -> Option<SystemTime> {
 pub fn load(dir: &Path) -> Result<Config, String> {
     let text =
         std::fs::read_to_string(path(dir)).map_err(|e| format!("cannot read config: {e}"))?;
-    // Tolerate a UTF-8 BOM written by some editors.
+    // Some editors write a UTF-8 BOM. Ignore it.
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
     serde_json::from_str(text).map_err(|e| format!("config.json: {e}"))
 }
 
-/// Load the config; on first run create it from the topology.
-/// A broken file is never overwritten: defaults are used in memory only.
-/// The second value is a message for the log, if anything noteworthy happened.
+/// Load the config. At the first start, make it from the topology.
+/// Do not overwrite a broken file: use the defaults in memory only.
+/// The second value is a message for the log, if necessary.
 pub fn load_or_create(dir: &Path, topo: &Topology) -> (Config, Option<String>) {
     if !path(dir).exists() {
         let cfg = Config::defaults(topo);

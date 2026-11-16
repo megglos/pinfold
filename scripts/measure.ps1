@@ -1,5 +1,5 @@
 # A7: idle resource measurement. 5 rules, 2 matched processes, 10 minutes.
-# Runs a private tray instance (own config dir) next to the installed one.
+# Runs a private tray instance (own config directory) next to the installed one.
 param([int]$Seconds = 600)
 $repo = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $exe = Join-Path $repo 'target\release\Pinfold.exe'

@@ -1,8 +1,8 @@
 //! Pinfold: persistent per-process CPU affinity for Windows.
 //!
 //! No arguments: background instance with tray icon.
-//! `add`, `remove`, `list`, `topology`: short-lived instances that only
-//! read or write the config; the background instance reloads it.
+//! `add`, `remove`, `list`, `topology`: short instances that only read or
+//! write the config. The background instance then reads it again.
 //! `run`: the engine in a console, without tray (milestone M0).
 
 #![windows_subsystem = "windows"]
@@ -82,10 +82,9 @@ fn main() {
     std::process::exit(code);
 }
 
-/// Loads the config for a short-lived instance, creating it on first run.
-/// A config that exists but cannot be parsed is reported and left alone,
-/// so that a command never overwrites a file the user is in the middle of
-/// editing.
+/// Loads the config for a short instance. Makes it at the first start.
+/// If the config is not correct, tell the user and do not change it: the
+/// user can be in the middle of an edit.
 fn load_config(gui: bool) -> Option<Config> {
     let dir = config::dir();
     if !config::path(&dir).exists() {
@@ -117,7 +116,7 @@ fn cmd_run() -> i32 {
     }
 }
 
-/// The rule pattern for a path given by the user.
+/// The rule pattern for a path from the user.
 fn pattern_for(path: &str, full_path: bool) -> String {
     if full_path {
         std::path::absolute(path)
@@ -156,7 +155,7 @@ fn cmd_add(args: &[String]) -> i32 {
         say(USAGE);
         return 2;
     };
-    // A shortcut is resolved to the program it starts.
+    // For a shortcut, use the program that it starts.
     let path = match shortcut::program_for(&path) {
         Ok(p) => p,
         Err(e) => {
@@ -242,7 +241,7 @@ fn cmd_topology() -> i32 {
     0
 }
 
-/// `autostart` shows the state; `on` and `off` change it. The elevated
+/// `autostart` shows the state. `on` and `off` change it. The elevated
 /// variant shows one UAC prompt.
 fn cmd_autostart(args: &[String]) -> i32 {
     let result = match args.first().map(String::as_str) {
@@ -297,8 +296,8 @@ fn cmd_benchmark(args: &[String]) -> i32 {
             0
         }
         Err(bench::Failure::NeedsElevation) => {
-            // PresentMon needs administrator rights: continue in an
-            // elevated copy of this command, in its own window.
+            // PresentMon needs administrator rights. Continue in an
+            // elevated copy of this command, in a new window.
             say("PresentMon needs administrator rights. Continuing in an elevated window...");
             let mut elevated = opts.to_args();
             if !opts.window {
@@ -309,7 +308,7 @@ fn cmd_benchmark(args: &[String]) -> i32 {
                 .map_err(|e| e.to_string())
                 .and_then(|exe| win::launch_elevated(&exe, &elevated));
             match started {
-                // The elevated window takes over; this one can close.
+                // The elevated window continues. This one can close.
                 Ok(()) => return 0,
                 Err(e) => {
                     say(&format!("Benchmark stopped: {e}"));
@@ -330,13 +329,13 @@ fn cmd_benchmark(args: &[String]) -> i32 {
 
 static CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Ctrl+C or closing the window cancels the benchmark, so that the rule is
-/// put back instead of being left on whatever profile was being measured.
+/// Ctrl+C or a close of the window stops the benchmark. The benchmark then
+/// puts the rule back. If not, the rule keeps the profile under test.
 unsafe extern "system" fn on_console_ctrl(event: u32) -> windows_sys::Win32::Foundation::BOOL {
     CANCEL.store(true, std::sync::atomic::Ordering::Relaxed);
     if event == windows_sys::Win32::System::Console::CTRL_CLOSE_EVENT {
-        // The process ends when this returns: give the benchmark time to
-        // notice and restore the rule.
+        // The process stops when this function returns. Give the benchmark
+        // time to put the rule back.
         std::thread::sleep(std::time::Duration::from_secs(2));
     }
     1
@@ -370,7 +369,7 @@ fn offer_winner(opts: &bench::Options, outcome: &bench::Outcome) {
     let yes = opts.apply || {
         say(&format!("Make {winner} the rule for {target}? [Y/n]"));
         let mut line = String::new();
-        // No answer at all (no console, end of input) is a no.
+        // No answer (no console, end of input) means no.
         matches!(std::io::stdin().read_line(&mut line), Ok(n) if n > 0)
             && matches!(line.trim().to_lowercase().as_str(), "" | "y" | "yes")
     };
@@ -398,8 +397,8 @@ fn cmd_quit() -> i32 {
     }
 }
 
-/// Started with a single path: something was dropped onto the executable.
-/// Show a profile picker at the mouse position, write the rule, exit.
+/// Started with one path: the user dropped a file on the executable.
+/// Show the profiles at the mouse position, write the rule, stop.
 fn cmd_drop(path: &str) -> i32 {
     let path = match shortcut::program_for(path) {
         Ok(p) => p,

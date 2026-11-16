@@ -1,6 +1,6 @@
 //! End-to-end tests: the real engine (`Pinfold.exe run`) pins real
-//! processes. Each test uses a target program with a unique file name, so
-//! tests can run in parallel and never affect other programs.
+//! processes. Each test uses a target program with a unique file name.
+//! Thus tests can run in parallel and do not affect other programs.
 
 mod common;
 use common::{multi_cpu, wait_for, Sandbox, TIMEOUT};
@@ -93,12 +93,12 @@ fn repeated_drift_backs_off_as_contested() {
         return;
     }
     let all = p.system_mask();
-    // Five drifts are restored ...
+    // The engine corrects five drifts ...
     for i in 0..5 {
         p.set_affinity(all);
         wait_for(&format!("restore {i}"), TIMEOUT, || p.affinity() == CPU0);
     }
-    // ... the sixth within a minute is left alone.
+    // ... but not the sixth in one minute.
     p.set_affinity(all);
     wait_for("contested log", TIMEOUT, || s.log().contains("contested"));
     std::thread::sleep(std::time::Duration::from_millis(800));

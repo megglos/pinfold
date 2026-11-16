@@ -1,6 +1,6 @@
-# Generates assets\pinfold.ico and assets\pinfold-paused.ico.
-# A chip with four cores; the pinned half is lit. Every size is drawn
-# natively on the pixel grid so the 16 px tray version stays crisp.
+# Makes assets\pinfold.ico and assets\pinfold-paused.ico.
+# A chip with four cores. The pinned half is lit. Each size is drawn on
+# the pixel grid, thus the 16 px tray icon stays sharp.
 #
 #   powershell -ExecutionPolicy Bypass -File assets\make-icon.ps1
 
@@ -28,7 +28,7 @@ function New-IconPng([int]$s, [bool]$paused) {
     $g.PixelOffsetMode = 'Half'
     $g.Clear([System.Drawing.Color]::Transparent)
 
-    # Leads only where there are enough pixels for them.
+    # Draw the leads only if there are sufficient pixels.
     $leads = $s -ge 24
     $inset = if ($leads) { [math]::Round($s * 0.125) } else { [math]::Max(0, [math]::Round($s * 0.03)) }
     $body = $s - 2 * $inset
@@ -60,7 +60,7 @@ function New-IconPng([int]$s, [bool]$paused) {
     }
     $path.Dispose()
 
-    # 2 x 2 cores: left column lit (the pinned half), right column dim.
+    # 2 x 2 cores: left column lit (pinned half), right column dark.
     $pad = [math]::Max(2, [math]::Round($body * 0.17))
     $gap = [math]::Max(1, [math]::Round($body * 0.11))
     if ($s -le 16) { $gap = 2 }
@@ -131,7 +131,7 @@ if ($args.Count -eq 2 -and $args[0] -eq '-Preview') {
             }
             $x += $s + 10
         }
-        # 16 px magnified 8x to judge the tray version
+        # 16 px icon, 8 times larger, to examine the tray icon
         $img = [System.Drawing.Image]::FromStream((New-Object System.IO.MemoryStream (,(New-IconPng 16 $false))))
         $g.DrawImage($img, $ox + 195, 150, 128, 128)
     }
