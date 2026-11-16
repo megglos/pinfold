@@ -163,7 +163,7 @@ Measured against the resource budget (spec section 8), 10 minutes idle with
 |---|---|---|
 | Private memory | under 5 MB | 2.6 MB |
 | CPU | under 0.1 % of one core | 0.018 % |
-| Executable size | under 2 MB | 0.4 MB |
+| Executable size | under 2 MB | 0.5 MB |
 | Disk writes when nothing happens | none | none |
 | Threads | 1 worker plus tray loop | 3: the engine runs on the tray thread; the other two belong to Windows |
 
