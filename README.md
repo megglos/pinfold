@@ -74,9 +74,9 @@ Set `"elevatedAutostart": false` in the config to use the plain
 ## Benchmark: which profile is faster for a game?
 
 Pinfold can measure it. With the game running, open the tray menu >
-**Rules** > the game > **Benchmark** and pick a comparison: "Cache vs
+**Benchmark** and pick a comparison under the game: "Cache vs
 Frequency", the rule's profile against each other profile, or all profiles.
-Then switch to the game.
+Then switch to the game; a notification says so too.
 
 The benchmark starts when the game is the window in front. It switches the
 game between the profiles, captures the frame times in each with
@@ -92,7 +92,7 @@ The result comes as a notification and a dialog with a verdict:
 
 - **a clear winner** when one profile was fastest in every round and by more
   than the rounds of one profile varied (at least 2 %). The dialog offers to
-  make it the rule.
+  make it the rule, and "Open report" shows the full report.
 - **no clear winner** otherwise, with the reason (the rounds disagree, or the
   difference is within the noise).
 - **GPU-bound** when the graphics card was busy for 90 % or more of every

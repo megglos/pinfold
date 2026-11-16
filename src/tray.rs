@@ -282,21 +282,6 @@ fn build_menu(e: &Engine) -> (HMENU, Menu) {
             m.sep(sub);
             m.item(sub, "Enforce", r.enforce, Action::ToggleEnforce { pattern: r.pattern.clone() });
             m.item(sub, "Remove rule", false, Action::Remove { pattern: r.pattern.clone() });
-            m.sep(sub);
-            if running {
-                m.item(sub, "Benchmark (one is running)", false, Action::Nothing);
-            } else if count > 0 {
-                let bench = CreatePopupMenu();
-                let names: Vec<String> = e.cfg.profiles.iter().map(|p| p.name.clone()).collect();
-                for choice in benchmark_choices(&names, &r.profile) {
-                    let label = choice_label(&choice, names.len());
-                    let action = Action::Benchmark { pattern: r.pattern.clone(), profiles: choice };
-                    m.item(bench, &label, false, action);
-                }
-                m.sub(sub, "Benchmark", bench);
-            } else {
-                m.item(sub, "Benchmark (start the program first)", false, Action::Nothing);
-            }
             let status = if count == 0 {
                 "not running".to_string()
             } else {
@@ -307,6 +292,38 @@ fn build_menu(e: &Engine) -> (HMENU, Menu) {
         m.sub(root, "Rules", rules);
         m.item(root, "Add program...", false, Action::AddProgram);
         m.sep(root);
+
+        // Benchmark > comparisons, grouped by running program with a rule
+        if !running {
+            let names: Vec<String> = e.cfg.profiles.iter().map(|p| p.name.clone()).collect();
+            let targets: Vec<&config::Rule> = (0..e.cfg.rules.len())
+                .filter(|&i| e.rule_status(i).1 > 0)
+                .map(|i| &e.cfg.rules[i])
+                .collect();
+            if targets.is_empty() {
+                m.item(root, "Benchmark (start a program with a rule)", false, Action::Nothing);
+            } else {
+                let bench = CreatePopupMenu();
+                for (n, r) in targets.iter().enumerate() {
+                    if n > 0 {
+                        m.sep(bench);
+                    }
+                    m.item(
+                        bench,
+                        &format!("{}  (now {})", r.pattern, r.profile),
+                        false,
+                        Action::Nothing,
+                    );
+                    for choice in benchmark_choices(&names, &r.profile) {
+                        let label = format!("    {}", choice_label(&choice, names.len()));
+                        let action =
+                            Action::Benchmark { pattern: r.pattern.clone(), profiles: choice };
+                        m.item(bench, &label, false, action);
+                    }
+                }
+                m.sub(root, "Benchmark", bench);
+            }
+        }
         m.item(root, "Pause", e.paused, Action::TogglePause);
         m.item(root, "Open config", false, Action::OpenConfig);
         m.item(root, "Open log", false, Action::OpenLog);
@@ -543,6 +560,86 @@ fn tell(text: &str) {
     }
 }
 
+const BUTTON_APPLY: i32 = 100;
+const BUTTON_REPORT: i32 = 101;
+const BUTTON_CLOSE: i32 = 102;
+
+/// The benchmark result with buttons to open the report and, when another
+/// profile won, to make it the rule. "Open report" leaves the dialog open.
+/// Returns true when the winner should become the rule.
+fn result_dialog(heading: &str, text: &str, report: &str, apply: Option<(&str, &str)>) -> bool {
+    use windows_sys::Win32::UI::Controls::{
+        TaskDialogIndirect, TASKDIALOGCONFIG, TASKDIALOG_BUTTON, TDF_ALLOW_DIALOG_CANCELLATION,
+        TDN_BUTTON_CLICKED, TD_INFORMATION_ICON,
+    };
+
+    unsafe extern "system" fn callback(
+        _hwnd: HWND,
+        msg: i32,
+        wparam: WPARAM,
+        _lparam: LPARAM,
+        data: isize,
+    ) -> i32 {
+        if msg == TDN_BUTTON_CLICKED && wparam as i32 == BUTTON_REPORT {
+            open(&*(data as *const String));
+            return 1; // S_FALSE: keep the dialog open
+        }
+        0
+    }
+
+    let labels: Vec<(i32, String)> = match apply {
+        Some((winner, current)) => vec![
+            (BUTTON_APPLY, format!("Make {winner} the rule")),
+            (BUTTON_REPORT, "Open report".to_string()),
+            (BUTTON_CLOSE, format!("Keep {current}")),
+        ],
+        None => {
+            vec![(BUTTON_REPORT, "Open report".to_string()), (BUTTON_CLOSE, "Close".to_string())]
+        }
+    };
+    let wide_labels: Vec<Vec<u16>> = labels.iter().map(|(_, l)| wide(l)).collect();
+    let buttons: Vec<TASKDIALOG_BUTTON> = labels
+        .iter()
+        .zip(&wide_labels)
+        .map(|((id, _), l)| TASKDIALOG_BUTTON { nButtonID: *id, pszButtonText: l.as_ptr() })
+        .collect();
+    let title = wide("Pinfold benchmark");
+    let heading_w = wide(heading);
+    let text_w = wide(text);
+    let report = report.to_string();
+
+    let mut pressed = 0i32;
+    unsafe {
+        let mut cfg: TASKDIALOGCONFIG = std::mem::zeroed();
+        cfg.cbSize = std::mem::size_of::<TASKDIALOGCONFIG>() as u32;
+        cfg.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION;
+        cfg.pszWindowTitle = title.as_ptr();
+        cfg.Anonymous1.pszMainIcon = TD_INFORMATION_ICON;
+        cfg.pszMainInstruction = heading_w.as_ptr();
+        cfg.pszContent = text_w.as_ptr();
+        cfg.cButtons = buttons.len() as u32;
+        cfg.pButtons = buttons.as_ptr();
+        cfg.nDefaultButton = buttons[0].nButtonID;
+        cfg.pfCallback = Some(callback);
+        cfg.lpCallbackData = &report as *const String as isize;
+        if TaskDialogIndirect(&cfg, &mut pressed, null_mut(), null_mut()) < 0 {
+            // No task dialog: fall back to a plain message box.
+            let mut plain = format!("{heading}\n\n{text}\n\nReport: {report}");
+            return match apply {
+                Some((winner, _)) => {
+                    plain.push_str(&format!("\n\nMake {winner} the rule?"));
+                    ask(&plain)
+                }
+                None => {
+                    tell(&plain);
+                    false
+                }
+            };
+        }
+    }
+    pressed == BUTTON_APPLY
+}
+
 fn start_benchmark(hwnd: HWND, target: String, profiles: Vec<String>) {
     let paused = ENGINE.with(|e| e.borrow().as_ref().map(|e| e.paused)).unwrap_or(false);
     if paused {
@@ -555,6 +652,12 @@ fn start_benchmark(hwnd: HWND, target: String, profiles: Vec<String>) {
         _ => return,
     }
     let hwnd = hwnd as usize;
+    notify(
+        hwnd,
+        &format!("Benchmark of {target}: switch to it"),
+        "It starts once the program is in front. Hover the Pinfold icon for progress; \
+         right-click it to stop.",
+    );
     let args = [target.clone(), "--profiles".to_string(), profiles.join(",")];
     std::thread::spawn(move || {
         let ui = TrayUi { hwnd };
@@ -583,28 +686,30 @@ fn finish_benchmark(hwnd: usize, target: &str, result: Result<bench::Outcome, be
                 None => format!("Benchmark of {target}: no clear winner"),
             };
             notify(hwnd, &title, &outcome.verdict.text);
+            let heading = match &outcome.verdict.winner {
+                Some(w) => format!("{w} wins for {target}"),
+                None => format!("No clear winner for {target}"),
+            };
             let mut text = format!("{}\n\n{}", outcome.verdict.text, outcome.summary);
             if let Some(note) = &outcome.gpu_note {
                 text.push_str(&format!("\n{note}"));
             }
-            text.push_str(&format!(
-                "\n\nThe full report: \"Open last benchmark report\" in the Pinfold menu,\n{}",
-                outcome.report_path.display()
-            ));
-            match outcome.better_profile() {
-                Some(w) => {
-                    text.push_str(&format!("\n\nMake {w} the rule for {target}?"));
-                    if ask(&text) {
-                        if let Err(e) = bench::apply(target, w) {
-                            tell(&format!("Could not change the rule: {e}"));
-                        }
-                    }
+            let better = outcome.better_profile();
+            if better.is_none() {
+                if let Some(w) = &outcome.verdict.winner {
+                    text.push_str(&format!("\n\n{target} already uses {w}."));
                 }
-                None => {
-                    if let Some(w) = &outcome.verdict.winner {
-                        text.push_str(&format!("\n\n{target} already uses {w}."));
-                    }
-                    tell(&text);
+            }
+            let report = outcome.report_path.to_string_lossy().into_owned();
+            let current = outcome.current.as_deref().unwrap_or("the current profile");
+            let apply =
+                better.filter(|w| result_dialog(&heading, &text, &report, Some((w, current))));
+            if better.is_none() {
+                result_dialog(&heading, &text, &report, None);
+            }
+            if let Some(w) = apply {
+                if let Err(e) = bench::apply(target, w) {
+                    tell(&format!("Could not change the rule: {e}"));
                 }
             }
         }
