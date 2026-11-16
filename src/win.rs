@@ -9,9 +9,6 @@ use windows_sys::Win32::System::Console::{
     AllocConsole, AttachConsole, GetStdHandle, SetStdHandle, ATTACH_PARENT_PROCESS,
     STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
 };
-use windows_sys::Win32::UI::WindowsAndMessaging::{
-    MessageBoxW, MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND,
-};
 
 /// UTF-16, NUL-terminated.
 pub fn wide(s: &str) -> Vec<u16> {
@@ -152,17 +149,6 @@ pub fn wait_for_enter() {
 pub fn say(s: &str) {
     use std::io::Write;
     let _ = writeln!(std::io::stdout(), "{s}");
-}
-
-pub fn message_box(text: &str) {
-    unsafe {
-        MessageBoxW(
-            std::ptr::null_mut(),
-            wide(text).as_ptr(),
-            wide("Pinfold").as_ptr(),
-            MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND,
-        );
-    }
 }
 
 /// File name part of a Windows path.

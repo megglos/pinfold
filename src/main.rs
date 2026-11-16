@@ -11,6 +11,7 @@ mod autostart;
 mod bench;
 mod config;
 mod diag;
+mod dialog;
 mod engine;
 mod frametime;
 mod log;
@@ -22,7 +23,8 @@ mod tray;
 mod win;
 
 use config::{Config, Mode};
-use win::{file_name, message_box, say};
+use dialog::message_box;
+use win::{file_name, say};
 
 const USAGE: &str = "\
 Pinfold - persistent per-process CPU affinity

@@ -23,13 +23,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, ChangeWindowMessageFilterEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
     DestroyMenu, DestroyWindow, DispatchMessageW, EnumWindows, FindWindowW, GetCursorPos,
     GetMessageW, GetSystemMetrics, GetWindow, GetWindowTextLengthW, GetWindowThreadProcessId,
-    IsWindowVisible, KillTimer, LoadIconW, LoadImageW, MessageBoxW, PostMessageW, PostQuitMessage,
+    IsWindowVisible, KillTimer, LoadIconW, LoadImageW, PostMessageW, PostQuitMessage,
     RegisterClassW, RegisterWindowMessageW, SetForegroundWindow, SetTimer, TrackPopupMenu,
-    TranslateMessage, GW_OWNER, HMENU, IDI_APPLICATION, IDYES, IMAGE_ICON, LR_SHARED,
-    MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_YESNO, MF_CHECKED, MF_GRAYED, MF_POPUP,
-    MF_SEPARATOR, MF_STRING, MSG, MSGFLT_ALLOW, SM_CXSMICON, SM_CYSMICON, SW_SHOWNORMAL,
-    TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_DESTROY, WM_LBUTTONUP, WM_NULL,
-    WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
+    TranslateMessage, GW_OWNER, HMENU, IDI_APPLICATION, IMAGE_ICON, LR_SHARED, MF_CHECKED,
+    MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, MSGFLT_ALLOW, SM_CXSMICON, SM_CYSMICON,
+    SW_SHOWNORMAL, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_DESTROY, WM_LBUTTONUP,
+    WM_NULL, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
 };
 
 use windows_sys::Win32::Graphics::Gdi::{CreateBitmap, DeleteObject};
@@ -42,7 +41,8 @@ use crate::bench;
 use crate::config::{self, Mode};
 use crate::sys::{process_info, RealSystem};
 type Engine = crate::engine::Engine<RealSystem>;
-use crate::win::{file_name, from_wide, message_box, wide};
+use crate::dialog::{self, message_box, TaskDialog};
+use crate::win::{file_name, from_wide, wide};
 
 const WM_TRAY: u32 = WM_APP + 1;
 const TIMER_ID: usize = 1;
@@ -551,28 +551,15 @@ fn notify(hwnd: usize, title: &str, text: &str) {
     unsafe { PostMessageW(hwnd as HWND, WM_BENCH_NOTE, 0, 0) };
 }
 
+const BENCH_TITLE: &str = "Pinfold benchmark";
+
 fn ask(text: &str) -> bool {
-    unsafe {
-        MessageBoxW(
-            null_mut(),
-            wide(text).as_ptr(),
-            wide("Pinfold benchmark").as_ptr(),
-            MB_YESNO | MB_ICONQUESTION,
-        ) == IDYES
-    }
+    dialog::ask(BENCH_TITLE, text)
 }
 
 fn tell(text: &str) {
-    unsafe {
-        MessageBoxW(
-            null_mut(),
-            wide(text).as_ptr(),
-            wide("Pinfold benchmark").as_ptr(),
-            MB_OK | MB_ICONINFORMATION,
-        );
-    }
+    dialog::tell(BENCH_TITLE, text)
 }
-
 const BUTTON_APPLY: i32 = 100;
 const BUTTON_REPORT: i32 = 101;
 const BUTTON_CLOSE: i32 = 102;
@@ -581,26 +568,7 @@ const BUTTON_CLOSE: i32 = 102;
 /// open. If another profile won, one button makes it the rule. Returns true
 /// if the winner must become the rule.
 fn result_dialog(heading: &str, text: &str, report: &str, apply: Option<(&str, &str)>) -> bool {
-    use windows_sys::Win32::UI::Controls::{
-        TaskDialogIndirect, TASKDIALOGCONFIG, TASKDIALOG_BUTTON, TDF_ALLOW_DIALOG_CANCELLATION,
-        TDN_BUTTON_CLICKED, TD_INFORMATION_ICON,
-    };
-
-    unsafe extern "system" fn callback(
-        _hwnd: HWND,
-        msg: i32,
-        wparam: WPARAM,
-        _lparam: LPARAM,
-        data: isize,
-    ) -> i32 {
-        if msg == TDN_BUTTON_CLICKED && wparam as i32 == BUTTON_REPORT {
-            open(&*(data as *const String));
-            return 1; // S_FALSE: keep the dialog open
-        }
-        0
-    }
-
-    let labels: Vec<(i32, String)> = match apply {
+    let buttons = match apply {
         Some((winner, current)) => vec![
             (BUTTON_APPLY, format!("Make {winner} the rule")),
             (BUTTON_REPORT, "Open report".to_string()),
@@ -610,49 +578,35 @@ fn result_dialog(heading: &str, text: &str, report: &str, apply: Option<(&str, &
             vec![(BUTTON_REPORT, "Open report".to_string()), (BUTTON_CLOSE, "Close".to_string())]
         }
     };
-    let wide_labels: Vec<Vec<u16>> = labels.iter().map(|(_, l)| wide(l)).collect();
-    let buttons: Vec<TASKDIALOG_BUTTON> = labels
-        .iter()
-        .zip(&wide_labels)
-        .map(|((id, _), l)| TASKDIALOG_BUTTON { nButtonID: *id, pszButtonText: l.as_ptr() })
-        .collect();
-    let title = wide("Pinfold benchmark");
-    let heading_w = wide(heading);
-    let text_w = wide(text);
-    let report = report.to_string();
-
-    let mut pressed = 0i32;
-    unsafe {
-        let mut cfg: TASKDIALOGCONFIG = std::mem::zeroed();
-        cfg.cbSize = std::mem::size_of::<TASKDIALOGCONFIG>() as u32;
-        cfg.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION;
-        cfg.pszWindowTitle = title.as_ptr();
-        cfg.Anonymous1.pszMainIcon = TD_INFORMATION_ICON;
-        cfg.pszMainInstruction = heading_w.as_ptr();
-        cfg.pszContent = text_w.as_ptr();
-        cfg.cButtons = buttons.len() as u32;
-        cfg.pButtons = buttons.as_ptr();
-        cfg.nDefaultButton = buttons[0].nButtonID;
-        cfg.pfCallback = Some(callback);
-        cfg.lpCallbackData = &report as *const String as isize;
-        if TaskDialogIndirect(&cfg, &mut pressed, null_mut(), null_mut()) < 0 {
-            // No task dialog: use a message box.
-            let mut plain = format!("{heading}\n\n{text}\n\nReport: {report}");
-            return match apply {
-                Some((winner, _)) => {
-                    plain.push_str(&format!("\n\nMake {winner} the rule?"));
-                    ask(&plain)
-                }
+    let open_report = |id: i32| {
+        if id == BUTTON_REPORT {
+            open(report);
+        }
+        id == BUTTON_REPORT
+    };
+    let dialog = TaskDialog {
+        title: BENCH_TITLE,
+        heading,
+        text,
+        buttons,
+        on_button: Some(&open_report),
+        ..Default::default()
+    };
+    match dialog.show() {
+        Some(pressed) => pressed == BUTTON_APPLY,
+        // No task dialog: use a message box.
+        None => {
+            let plain = format!("{heading}\n\n{text}\n\nReport: {report}");
+            match apply {
+                Some((winner, _)) => ask(&format!("{plain}\n\nMake {winner} the rule?")),
                 None => {
                     tell(&plain);
                     false
                 }
-            };
+            }
         }
     }
-    pressed == BUTTON_APPLY
 }
-
 fn start_benchmark(hwnd: HWND, target: String, profiles: Vec<String>) {
     let paused = ENGINE.with(|e| e.borrow().as_ref().map(|e| e.paused)).unwrap_or(false);
     if paused {
@@ -775,10 +729,7 @@ unsafe fn show_note(hwnd: HWND) {
     let Some((title, text)) = bench_state().note.take() else {
         return;
     };
-    let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
-    nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
-    nid.hWnd = hwnd;
-    nid.uID = 1;
+    let mut nid = icon_data(hwnd);
     nid.uFlags = NIF_INFO;
     nid.dwInfoFlags = NIIF_INFO;
     fill(&mut nid.szInfoTitle, &title);
@@ -791,51 +742,23 @@ const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 
 /// Name, version, license and a link to the GitHub page.
 fn about() {
-    use windows_sys::Win32::UI::Controls::{
-        TaskDialogIndirect, TASKDIALOGCONFIG, TDCBF_OK_BUTTON, TDF_ALLOW_DIALOG_CANCELLATION,
-        TDF_ENABLE_HYPERLINKS, TDN_HYPERLINK_CLICKED, TD_INFORMATION_ICON,
-    };
-
-    unsafe extern "system" fn callback(
-        _hwnd: HWND,
-        msg: i32,
-        _wparam: WPARAM,
-        lparam: LPARAM,
-        _data: isize,
-    ) -> i32 {
-        if msg == TDN_HYPERLINK_CLICKED {
-            let mut len = 0;
-            let link = lparam as *const u16;
-            while *link.add(len) != 0 {
-                len += 1;
-            }
-            open(&String::from_utf16_lossy(std::slice::from_raw_parts(link, len)));
-        }
-        0
-    }
-
-    let title = wide("About Pinfold");
-    let heading = wide(&format!("Pinfold {VERSION}"));
-    let text = wide(&format!(
+    let heading = format!("Pinfold {VERSION}");
+    let text = format!(
         "Keeps programs on the CPU cores that you select.\n\nMIT license\n<a href=\"{REPOSITORY}\">{}</a>",
         REPOSITORY.trim_start_matches("https://")
-    ));
-    unsafe {
-        let mut cfg: TASKDIALOGCONFIG = std::mem::zeroed();
-        cfg.cbSize = std::mem::size_of::<TASKDIALOGCONFIG>() as u32;
-        cfg.dwFlags = TDF_ENABLE_HYPERLINKS | TDF_ALLOW_DIALOG_CANCELLATION;
-        cfg.dwCommonButtons = TDCBF_OK_BUTTON;
-        cfg.pszWindowTitle = title.as_ptr();
-        cfg.Anonymous1.pszMainIcon = TD_INFORMATION_ICON;
-        cfg.pszMainInstruction = heading.as_ptr();
-        cfg.pszContent = text.as_ptr();
-        cfg.pfCallback = Some(callback);
-        if TaskDialogIndirect(&cfg, null_mut(), null_mut(), null_mut()) < 0 {
-            message_box(&format!("Pinfold {VERSION}\n\nMIT license\n{REPOSITORY}"));
-        }
+    );
+    let dialog = TaskDialog {
+        title: "About Pinfold",
+        heading: &heading,
+        text: &text,
+        links: true,
+        on_link: Some(&|link: &str| open(link)),
+        ..Default::default()
+    };
+    if dialog.show().is_none() {
+        message_box(&format!("Pinfold {VERSION}\n\nMIT license\n{REPOSITORY}"));
     }
 }
-
 fn open(path: &str) {
     unsafe {
         ShellExecuteW(
@@ -944,12 +867,19 @@ unsafe fn acquire_single_instance() -> bool {
 
 // --- Icon, window, message loop --------------------------------------------
 
-unsafe fn update_icon(hwnd: HWND, message: u32) {
-    let paused = ENGINE.with(|e| e.try_borrow().ok().and_then(|g| g.as_ref().map(|e| e.paused)));
-    let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
+/// The data of our tray icon (id 1 of `hwnd`), without fields to change.
+fn icon_data(hwnd: HWND) -> NOTIFYICONDATAW {
+    // All fields of NOTIFYICONDATAW are plain data: zero is valid.
+    let mut nid: NOTIFYICONDATAW = unsafe { std::mem::zeroed() };
     nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
     nid.hWnd = hwnd;
     nid.uID = 1;
+    nid
+}
+
+unsafe fn update_icon(hwnd: HWND, message: u32) {
+    let paused = ENGINE.with(|e| e.try_borrow().ok().and_then(|g| g.as_ref().map(|e| e.paused)));
+    let mut nid = icon_data(hwnd);
     nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     nid.uCallbackMessage = WM_TRAY;
     let (status, progress) = {
@@ -1098,11 +1028,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
-            let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
-            nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
-            nid.hWnd = hwnd;
-            nid.uID = 1;
-            Shell_NotifyIconW(NIM_DELETE, &nid);
+            Shell_NotifyIconW(NIM_DELETE, &icon_data(hwnd));
             crate::log::log("exit");
             PostQuitMessage(0);
             0
