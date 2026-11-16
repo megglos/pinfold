@@ -36,6 +36,18 @@ $range = if ($previous) { "$previous..$end" } else { $end }
 $commits = Invoke-Git log --reverse --no-merges --format='%h %s' $range
 if ($commits.Count -eq 0) { throw "no commits in $range" }
 
+# GitHub shows each line break in release notes. Join the wrapped lines of
+# a paragraph or list item into one line. Keep code blocks as they are.
+$joined = @()
+$code = $false
+foreach ($line in $section) {
+    if ($line -match '^\s*```') { $code = -not $code; $joined += $line; continue }
+    $new = $code -or $line.Trim() -eq '' -or $line -match '^\s*([-*#|>]|\d+\.)\s' -or
+        $joined.Count -eq 0 -or $joined[-1].Trim() -eq '' -or $joined[-1] -match '^\s*(#|```|\|)'
+    if ($new) { $joined += $line } else { $joined[-1] = $joined[-1].TrimEnd() + ' ' + $line.Trim() }
+}
+$section = $joined
+
 $notes = New-Object System.Collections.Generic.List[string]
 $section | ForEach-Object { $notes.Add($_) }
 while ($notes.Count -gt 0 -and $notes[0].Trim() -eq '') { $notes.RemoveAt(0) }
