@@ -369,7 +369,12 @@ impl Run<'_> {
     /// Capture `profile` (already applied) while the game is in front. A
     /// capture during which the game lost focus for more than a second is
     /// thrown away and repeated.
-    fn capture(&self, round: u32, profile: &str, label: &str) -> Result<Vec<f64>, Failure> {
+    fn capture(
+        &self,
+        round: u32,
+        profile: &str,
+        label: &str,
+    ) -> Result<frametime::Capture, Failure> {
         let target = &self.opts.target;
         let safe: String =
             profile.chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).collect();
@@ -417,10 +422,10 @@ impl Run<'_> {
         }
         let text = std::fs::read_to_string(&csv)
             .map_err(|_| format!("PresentMon wrote no capture file ({})", csv.display()))?;
-        let times = frametime::parse_csv(&text, target).map_err(|e| {
+        let capture = frametime::parse_csv(&text, target).map_err(|e| {
             format!("{e} ({}). Was {target} in front and rendering?", csv.display())
         })?;
-        Ok(times)
+        Ok(capture)
     }
 }
 
@@ -642,6 +647,10 @@ pub fn run(opts: &Options, ui: &dyn Ui, cancel: &AtomicBool) -> Result<Outcome, 
         profiles.iter().map(|p| (p.clone(), Vec::new())).collect();
     let mut rounds_text = String::new();
     let mut per_round: Vec<(u32, String, f64)> = Vec::new();
+    // GPU busy and total frame time per profile; None once a capture
+    // lacks the GPU column.
+    let mut gpu: Vec<(String, Option<(f64, f64)>)> =
+        profiles.iter().map(|p| (p.clone(), Some((0.0, 0.0)))).collect();
     let mut outcome = Ok(());
     let started = (|| {
         run.wait_for_focus()?;
@@ -660,7 +669,15 @@ pub fn run(opts: &Options, ui: &dyn Ui, cancel: &AtomicBool) -> Result<Outcome, 
             run.switch(profile)?;
             let mask = run.mask_of(profile)?;
             ui.say(&format!("round {round}: {profile} (cpus {}) ...", format_mask(mask)));
-            let times = run.capture(*round, profile, &label)?;
+            let capture = run.capture(*round, profile, &label)?;
+            let times = capture.times;
+            if let Some((_, sums)) = gpu.iter_mut().find(|(p, _)| p == profile) {
+                let total: f64 = times.iter().sum();
+                *sums = match (*sums, capture.gpu_share) {
+                    (Some((b, t)), Some(share)) => Some((b + share * total, t + total)),
+                    _ => None,
+                };
+            }
             let s = frametime::stats(&times).ok_or("the capture contains no frames")?;
             let line = format!(
                 "round {round}: {profile:<12} {:>8.1} avg FPS  {:>8.1} 1% low  {:>7.2} ms p99  ({} frames)",
@@ -696,11 +713,21 @@ pub fn run(opts: &Options, ui: &dyn Ui, cancel: &AtomicBool) -> Result<Outcome, 
         .collect();
     let overall: Vec<(String, f64)> = columns.iter().map(|(p, s)| (p.clone(), s.avg_fps)).collect();
     let verdict = frametime::verdict(&overall, &per_round);
+    let shares: Option<Vec<(String, f64)>> = gpu
+        .iter()
+        .map(|(p, sums)| sums.filter(|(_, t)| *t > 0.0).map(|(b, t)| (p.clone(), b / t)))
+        .collect();
+    let gpu_note = shares.and_then(|s| frametime::gpu_note(&s));
     let mut text = format!(
         "Pinfold benchmark of {}\n{} rounds, {} s per capture, all rounds of a profile combined.\n\n\
-         Verdict: {}\n\n",
+         Verdict: {}\n",
         opts.target, opts.rounds, opts.seconds, verdict.text
     );
+    if let Some(note) = &gpu_note {
+        text.push_str(note);
+        text.push('\n');
+    }
+    text.push('\n');
     text.push_str(&frametime::report(&columns));
     text.push_str(
         "\nFPS rows: higher is better. Frame time rows: lower is better.\n\
@@ -710,7 +737,7 @@ pub fn run(opts: &Options, ui: &dyn Ui, cancel: &AtomicBool) -> Result<Outcome, 
     let report_path = run.out_dir.join("report.txt");
     let _ = std::fs::write(&report_path, &text);
     text.push_str(&format!("\nCaptures and this report: {}\n", run.out_dir.display()));
-    Ok(Outcome { report: text, verdict, current, report_path })
+    Ok(Outcome { report: text, verdict, gpu_note, current, report_path })
 }
 
 /// A finished benchmark.
@@ -718,6 +745,9 @@ pub struct Outcome {
     /// The full report, as printed and saved.
     pub report: String,
     pub verdict: frametime::Verdict,
+    /// How busy the GPU was, and whether that hid the CPU placement.
+    #[allow(dead_code)] // read by the tray (next commit)
+    pub gpu_note: Option<String>,
     /// The profile the rule had before the benchmark, if there was a rule.
     pub current: Option<String>,
     #[allow(dead_code)] // read by the tray (next commit)

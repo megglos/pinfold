@@ -6,6 +6,28 @@ struct Group {
     application: String,
     pid: String,
     times: Vec<f64>,
+    /// Sum and count of the GPU busy times that were reported.
+    gpu_busy: f64,
+    gpu_rows: usize,
+}
+
+/// The frames of one program in a capture.
+#[derive(Debug, PartialEq)]
+pub struct Capture {
+    /// Frame times in milliseconds.
+    pub times: Vec<f64>,
+    /// Share of the frame time the GPU was busy (0..1), when PresentMon
+    /// reported it for most frames.
+    pub gpu_share: Option<f64>,
+}
+
+impl Group {
+    fn capture(&self) -> Capture {
+        let total: f64 = self.times.iter().sum();
+        let gpu_share =
+            (self.gpu_rows * 2 >= self.times.len() && total > 0.0).then(|| self.gpu_busy / total);
+        Capture { times: self.times.clone(), gpu_share }
+    }
 }
 
 /// Frame times per process, in order of first appearance.
@@ -23,6 +45,7 @@ fn groups(text: &str) -> Result<Vec<Group>, String> {
         .ok_or("the capture has no FrameTime or MsBetweenPresents column")?;
     let pid_col = cols.iter().position(|c| c == "processid");
     let app_col = cols.iter().position(|c| c == "application" || c == "processname");
+    let gpu_col = cols.iter().position(|c| c == "msgpubusy" || c == "gpubusy");
 
     let mut groups: Vec<Group> = Vec::new();
     for line in lines {
@@ -35,13 +58,27 @@ fn groups(text: &str) -> Result<Vec<Group>, String> {
         }
         let field = |col: Option<usize>| col.and_then(|i| fields.get(i)).map_or("", |f| f.trim());
         let (app, pid) = (field(app_col), field(pid_col));
-        match groups.iter_mut().find(|g| g.pid == pid && g.application.eq_ignore_ascii_case(app)) {
-            Some(g) => g.times.push(value),
-            None => groups.push(Group {
-                application: app.to_string(),
-                pid: pid.to_string(),
-                times: vec![value],
-            }),
+        let gpu = field(gpu_col).parse::<f64>().ok().filter(|v| v.is_finite() && *v >= 0.0);
+        let g = match groups
+            .iter()
+            .position(|g| g.pid == pid && g.application.eq_ignore_ascii_case(app))
+        {
+            Some(i) => &mut groups[i],
+            None => {
+                groups.push(Group {
+                    application: app.to_string(),
+                    pid: pid.to_string(),
+                    times: Vec::new(),
+                    gpu_busy: 0.0,
+                    gpu_rows: 0,
+                });
+                groups.last_mut().unwrap()
+            }
+        };
+        g.times.push(value);
+        if let Some(busy) = gpu {
+            g.gpu_busy += busy;
+            g.gpu_rows += 1;
         }
     }
     Ok(groups)
@@ -55,7 +92,7 @@ fn groups(text: &str) -> Result<Vec<Group>, String> {
 /// frames is taken. When `target` presented no frames, the error names the
 /// programs that did: that tells a game that was not in front from a
 /// capture that did not work at all.
-pub fn parse_csv(text: &str, target: &str) -> Result<Vec<f64>, String> {
+pub fn parse_csv(text: &str, target: &str) -> Result<Capture, String> {
     let groups = groups(text)?;
     if groups.is_empty() {
         return Err("the capture contains no frames from any program".to_string());
@@ -67,7 +104,7 @@ pub fn parse_csv(text: &str, target: &str) -> Result<Vec<f64>, String> {
         .filter(|g| !named || g.application.eq_ignore_ascii_case(target))
         .max_by_key(|g| g.times.len());
     if let Some(g) = best {
-        return Ok(g.times.clone());
+        return Ok(g.capture());
     }
     // Total frames per program, busiest first.
     let mut seen: Vec<(String, usize)> = Vec::new();
@@ -310,9 +347,56 @@ pub fn verdict(overall: &[(String, f64)], rounds: &[(u32, String, f64)]) -> Verd
     }
 }
 
+/// GPU busy share from which a capture counts as GPU-bound.
+const GPU_BOUND: f64 = 0.9;
+
+/// A line on how busy the GPU was per profile, and whether that hides any
+/// effect of the CPU placement. `shares` is (profile, GPU busy share).
+pub fn gpu_note(shares: &[(String, f64)]) -> Option<String> {
+    if shares.is_empty() {
+        return None;
+    }
+    let list: Vec<String> = shares.iter().map(|(p, s)| format!("{p} {:.0}%", 100.0 * s)).collect();
+    let mut text = format!("GPU busy for {} of the frame time.", list.join(", "));
+    if shares.iter().all(|(_, s)| *s >= GPU_BOUND) {
+        text.push_str(
+            " The game is GPU-bound: the CPU waits for the graphics card, so where it runs \
+             can hardly change the frame rate. Lower the resolution or render scale (or \
+             unlock the frame rate) to compare CPU profiles.",
+        );
+    }
+    Some(text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gpu_busy_share_is_read_when_present() {
+        let csv = "Application,ProcessID,MsBetweenPresents,MsGPUBusy\n\
+                   game.exe,1,10.0,9.0\ngame.exe,1,10.0,9.5\ngame.exe,1,10.0,NA\n";
+        let c = parse_csv(csv, "game.exe").unwrap();
+        assert!(close(c.gpu_share.unwrap(), 18.5 / 30.0));
+        let csv = "Application,ProcessID,MsBetweenPresents,MsGPUBusy\n\
+                   game.exe,1,10.0,NA\ngame.exe,1,10.0,NA\ngame.exe,1,10.0,9\n";
+        assert_eq!(parse_csv(csv, "game.exe").unwrap().gpu_share, None, "mostly missing");
+        let csv = "Application,ProcessID,MsBetweenPresents\ngame.exe,1,10.0\n";
+        assert_eq!(parse_csv(csv, "game.exe").unwrap().gpu_share, None);
+    }
+
+    #[test]
+    fn gpu_bound_only_when_every_profile_is() {
+        let s = |list: &[(&str, f64)]| -> Vec<(String, f64)> {
+            list.iter().map(|(p, v)| (p.to_string(), *v)).collect()
+        };
+        let bound = gpu_note(&s(&[("Cache", 0.97), ("Frequency", 0.95)])).unwrap();
+        assert!(bound.starts_with("GPU busy for Cache 97%, Frequency 95%"), "{bound}");
+        assert!(bound.contains("GPU-bound"), "{bound}");
+        let free = gpu_note(&s(&[("Cache", 0.97), ("Frequency", 0.7)])).unwrap();
+        assert!(!free.contains("GPU-bound"), "{free}");
+        assert_eq!(gpu_note(&[]), None);
+    }
 
     fn r(round: u32, profile: &str, fps: f64) -> (u32, String, f64) {
         (round, profile.to_string(), fps)
@@ -389,14 +473,14 @@ mod tests {
         let csv = "Application,ProcessID,SwapChainAddress,MsBetweenPresents,MsInPresentAPI\n\
                    game.exe,100,0x1,10.5,0.2\n\
                    game.exe,100,0x1,11.5,0.2\n";
-        assert_eq!(parse_csv(csv, "game.exe").unwrap(), [10.5, 11.5]);
+        assert_eq!(parse_csv(csv, "game.exe").unwrap().times, [10.5, 11.5]);
     }
 
     #[test]
     fn parses_v2_frame_time_column_and_bom() {
         let csv =
             "\u{feff}Application,ProcessID,FrameTime\r\ngame.exe,1,16.0\r\ngame.exe,1,17.0\r\n";
-        assert_eq!(parse_csv(csv, "game.exe").unwrap(), [16.0, 17.0]);
+        assert_eq!(parse_csv(csv, "game.exe").unwrap().times, [16.0, 17.0]);
     }
 
     #[test]
@@ -405,7 +489,7 @@ mod tests {
                    game.exe,7,900\n\
                    game.exe,8,10\ngame.exe,8,10\ngame.exe,8,10\n\
                    dwm.exe,9,16\ndwm.exe,9,16\n";
-        assert_eq!(parse_csv(csv, "game.exe").unwrap(), [10.0, 10.0, 10.0]);
+        assert_eq!(parse_csv(csv, "game.exe").unwrap().times, [10.0, 10.0, 10.0]);
     }
 
     #[test]
@@ -415,7 +499,7 @@ mod tests {
                    Game.EXE,8,10\ngame.exe,8,11\n\
                    game.exe,7,500\n";
         // Not the busiest program overall, and not the helper process.
-        assert_eq!(parse_csv(csv, "game.exe").unwrap(), [10.0, 11.0]);
+        assert_eq!(parse_csv(csv, "game.exe").unwrap().times, [10.0, 11.0]);
     }
 
     #[test]
@@ -431,14 +515,14 @@ mod tests {
     #[test]
     fn capture_without_a_name_column_is_taken_as_is() {
         let csv = "ProcessID,FrameTime\n1,16.0\n1,17.0\n";
-        assert_eq!(parse_csv(csv, "game.exe").unwrap(), [16.0, 17.0]);
+        assert_eq!(parse_csv(csv, "game.exe").unwrap().times, [16.0, 17.0]);
     }
 
     #[test]
     fn skips_unusable_rows() {
         let csv = "Application,ProcessID,MsBetweenPresents\n\
                    game.exe,1,NA\ngame.exe,1,0\ngame.exe,1,-3\ngame.exe,1\ngame.exe,1,12\n\n";
-        assert_eq!(parse_csv(csv, "game.exe").unwrap(), [12.0]);
+        assert_eq!(parse_csv(csv, "game.exe").unwrap().times, [12.0]);
     }
 
     #[test]

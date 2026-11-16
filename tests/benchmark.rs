@@ -40,11 +40,12 @@ const CAPTURING: &str = r#"
 $out = $args[[array]::IndexOf($args, '--output_file') + 1]
 if ($args -notcontains '--timed' -or $args -notcontains '--terminate_after_timed') { exit 3 }
 if ($args -contains '--process_name') { exit 4 }
-$rows = @('Application,ProcessID,MsBetweenPresents')
-$rows += 1..500 | ForEach-Object { "dwm.exe,1,16.6" }
+$rows = @('Application,ProcessID,MsBetweenPresents,MsGPUBusy')
+$rows += 1..500 | ForEach-Object { "dwm.exe,1,16.6,1.0" }
 foreach ($p in Get-Process -Name 'pf-target-*' -ErrorAction SilentlyContinue) {
-    $ms = if ([int64]$p.ProcessorAffinity -eq 1) { '10.0' } else { '20.0' }
-    $rows += 1..200 | ForEach-Object { "$($p.Name).exe,$($p.Id),$ms" }
+    # The GPU is busy 95 % of every frame: GPU-bound.
+    $ms, $gpu = if ([int64]$p.ProcessorAffinity -eq 1) { '10.0', '9.5' } else { '20.0', '19.0' }
+    $rows += 1..200 | ForEach-Object { "$($p.Name).exe,$($p.Id),$ms,$gpu" }
 }
 [IO.File]::WriteAllLines($out, $rows)
 "#;
@@ -108,6 +109,10 @@ fn compares_profiles_and_leaves_no_trace_when_there_was_no_rule() {
     // A clear result, but nobody answered the question: nothing changes.
     assert!(text.contains("Verdict: One is 100.0% faster than Wide"), "{text}");
     assert!(text.contains("Make One the rule for") && text.contains("unchanged"), "{text}");
+    assert!(
+        text.contains("GPU busy for One 95%, Wide 95%") && text.contains("GPU-bound"),
+        "{text}"
+    );
 
     // No rule existed before: none afterwards, and the program is unpinned.
     assert_eq!(rule_count(&s), 0);
