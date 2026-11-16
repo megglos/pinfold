@@ -1,31 +1,42 @@
-//! Poll, match, apply, drift check, back-off. No UI dependencies.
+//! Poll, match, apply, drift check, back-off.
+//!
+//! The engine has no UI and no direct OS dependencies: everything it does
+//! to processes goes through the `System` trait, so it can be tested with
+//! a fake (see the tests at the bottom). `sys::RealSystem` is the real one.
 
 use std::collections::VecDeque;
-use std::ptr::{null, null_mut};
+use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
-use windows_sys::Win32::System::ProcessStatus::EnumProcesses;
-use windows_sys::Win32::System::Threading::{
-    GetProcessAffinityMask, GetProcessDefaultCpuSets, GetProcessTimes, OpenProcess,
-    QueryFullProcessImageNameW, SetProcessAffinityMask, SetProcessDefaultCpuSets,
-    WaitForSingleObject,
-};
-
 use crate::config::{self, Config, Mode};
-use crate::log::log;
 use crate::topology::{self, format_mask, Topology};
-use crate::win::{file_name, from_wide};
-
-const PROCESS_SET_INFORMATION: u32 = 0x0200;
-const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
-const PROCESS_SET_LIMITED_INFORMATION: u32 = 0x2000;
-const SYNCHRONIZE: u32 = 0x0010_0000;
-const WAIT_OBJECT_0: u32 = 0;
+use crate::win::file_name;
 
 /// More than this many drifts inside the window marks the instance contested.
 pub const DRIFT_LIMIT: usize = 5;
 pub const DRIFT_WINDOW: Duration = Duration::from_secs(60);
+
+/// Opaque process handle owned by the `System` implementation.
+pub type Handle = usize;
+
+/// Everything the engine needs from the operating system.
+/// Errors are Win32 error codes.
+pub trait System {
+    /// Replace `out` with the PIDs of all running processes.
+    fn pids(&mut self, out: &mut Vec<u32>);
+    /// Image path and start time; None when the process cannot be queried.
+    fn info(&mut self, pid: u32) -> Option<(String, u64)>;
+    /// Open a process for reading and changing its affinity.
+    fn open(&mut self, pid: u32) -> Result<Handle, u32>;
+    fn close(&mut self, handle: Handle);
+    fn exited(&mut self, handle: Handle) -> bool;
+    fn set_affinity(&mut self, handle: Handle, mask: u64) -> Result<(), u32>;
+    fn affinity(&mut self, handle: Handle) -> Option<u64>;
+    /// An empty slice clears the process default CPU Sets.
+    fn set_cpu_sets(&mut self, handle: Handle, ids: &[u32]) -> Result<(), u32>;
+    fn cpu_sets(&mut self, handle: Handle) -> Option<Vec<u32>>;
+    fn log(&mut self, msg: &str);
+}
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum State {
@@ -48,7 +59,7 @@ impl State {
 /// enforcement, which also keeps the PID from being reused.
 pub struct Tracked {
     pub pid: u32,
-    handle: HANDLE,
+    handle: Option<Handle>,
     pub path: String,
     pub rule: usize,
     pub state: State,
@@ -61,7 +72,9 @@ struct Resolved {
     sets: Vec<u32>,
 }
 
-pub struct Engine {
+pub struct Engine<S: System> {
+    pub sys: S,
+    dir: PathBuf,
     pub cfg: Config,
     pub topo: Topology,
     /// Per rule: the resolved profile, or None when the rule is invalid.
@@ -103,39 +116,21 @@ fn record_drift(drifts: &mut VecDeque<Instant>, now: Instant) -> bool {
     drifts.len() > DRIFT_LIMIT
 }
 
-/// Image path and creation time of a process.
-pub fn process_info(pid: u32) -> Option<(String, u64)> {
-    unsafe {
-        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if h.is_null() {
-            return None;
+impl<S: System> Engine<S> {
+    /// `dir` holds config.json; it is created with defaults on first run.
+    pub fn new(mut sys: S, dir: PathBuf, topo: Topology) -> Engine<S> {
+        let (cfg, note) = config::load_or_create(&dir, &topo);
+        if let Some(note) = note {
+            sys.log(&note);
         }
-        let mut buf = [0u16; 1024];
-        let mut len = buf.len() as u32;
-        let ok = QueryFullProcessImageNameW(h, 0, buf.as_mut_ptr(), &mut len) != 0;
-        let mut times = [std::mem::zeroed::<windows_sys::Win32::Foundation::FILETIME>(); 4];
-        let (c, rest) = times.split_at_mut(1);
-        let (e, rest) = rest.split_at_mut(1);
-        let (k, u) = rest.split_at_mut(1);
-        GetProcessTimes(h, &mut c[0], &mut e[0], &mut k[0], &mut u[0]);
-        CloseHandle(h);
-        if !ok {
-            return None;
-        }
-        let start = ((c[0].dwHighDateTime as u64) << 32) | c[0].dwLowDateTime as u64;
-        Some((from_wide(&buf[..len as usize]), start))
-    }
-}
-
-impl Engine {
-    pub fn new() -> Engine {
-        let topo = topology::read();
-        let cfg = config::load_or_create(&topo);
+        let cfg_mtime = config::mtime(&dir);
         let mut e = Engine {
+            sys,
+            dir,
             cfg,
             topo,
             resolved: Vec::new(),
-            cfg_mtime: config::mtime(),
+            cfg_mtime,
             prev: Vec::new(),
             cur: Vec::new(),
             tracked: Vec::new(),
@@ -162,7 +157,7 @@ impl Engine {
             match entry {
                 Ok(r) => resolved.push(Some(r)),
                 Err(e) => {
-                    log(&format!("config error: rule '{}' ignored: {e}", r.pattern));
+                    self.sys.log(&format!("config error: rule '{}' ignored: {e}", r.pattern));
                     resolved.push(None);
                 }
             }
@@ -177,25 +172,31 @@ impl Engine {
     /// One poll. Cheap when nothing changed: one PID list, a diff, and a
     /// few calls per matched process.
     pub fn tick(&mut self) {
-        if config::mtime() != self.cfg_mtime {
+        if config::mtime(&self.dir) != self.cfg_mtime {
             self.reload_from_disk();
         }
         if self.paused {
             return;
         }
-        self.enum_pids();
+        self.cur.clear();
+        self.sys.pids(&mut self.cur);
+        self.cur.sort_unstable();
 
         // Drop processes that exited.
-        let cur = &self.cur;
-        self.tracked.retain(|t| {
-            let alive = cur.binary_search(&t.pid).is_ok()
-                && (t.handle.is_null()
-                    || unsafe { WaitForSingleObject(t.handle, 0) } != WAIT_OBJECT_0);
-            if !alive && !t.handle.is_null() {
-                unsafe { CloseHandle(t.handle) };
+        let mut i = 0;
+        while i < self.tracked.len() {
+            let t = &self.tracked[i];
+            let gone = self.cur.binary_search(&t.pid).is_err()
+                || t.handle.is_some_and(|h| self.sys.exited(h));
+            if gone {
+                let t = self.tracked.swap_remove(i);
+                if let Some(h) = t.handle {
+                    self.sys.close(h);
+                }
+            } else {
+                i += 1;
             }
-            alive
-        });
+        }
 
         // Only new PIDs are opened and matched.
         for i in 0..self.cur.len() {
@@ -215,56 +216,35 @@ impl Engine {
         }
     }
 
-    fn enum_pids(&mut self) {
-        if self.cur.len() < 1024 {
-            self.cur.resize(1024, 0);
-        }
-        loop {
-            let bytes = (self.cur.len() * 4) as u32;
-            let mut needed = 0u32;
-            let ok = unsafe { EnumProcesses(self.cur.as_mut_ptr(), bytes, &mut needed) };
-            if ok == 0 {
-                self.cur.clear();
-                return;
-            }
-            if needed < bytes {
-                self.cur.truncate(needed as usize / 4);
-                break;
-            }
-            let n = self.cur.len() * 2;
-            self.cur.resize(n, 0);
-        }
-        self.cur.sort_unstable();
-    }
-
     fn inspect(&mut self, pid: u32) {
-        let Some((path, _start)) = process_info(pid) else { return };
-        let Some(rule) = self.find_rule(&path) else { return };
+        let Some((path, _start)) = self.sys.info(pid) else {
+            return;
+        };
+        let Some(rule) = self.find_rule(&path) else {
+            return;
+        };
         let name = file_name(&path).to_string();
-        let access = PROCESS_SET_INFORMATION
-            | PROCESS_SET_LIMITED_INFORMATION
-            | PROCESS_QUERY_LIMITED_INFORMATION
-            | SYNCHRONIZE;
-        let handle = unsafe { OpenProcess(access, 0, pid) };
         let mut t = Tracked {
             pid,
-            handle,
+            handle: None,
             path,
             rule,
             state: State::Ok,
             last_apply: Instant::now(),
             drifts: VecDeque::new(),
         };
-        if handle.is_null() {
-            let err = unsafe { GetLastError() };
-            log(&format!("denied {name} pid {pid}: cannot open process (error {err})"));
-            t.state = State::Denied;
-        } else {
-            match self.apply(handle, rule) {
+        match self.sys.open(pid) {
+            Err(err) => {
+                self.sys
+                    .log(&format!("denied {name} pid {pid}: cannot open process (error {err})"));
+                t.state = State::Denied;
+            }
+            Ok(handle) => match self.apply(handle, rule) {
                 Ok(()) => {
+                    t.handle = Some(handle);
                     let r = &self.cfg.rules[rule];
                     let mask = self.resolved[rule].as_ref().map(|r| r.mask).unwrap_or(0);
-                    log(&format!(
+                    self.sys.log(&format!(
                         "applied {name} pid {pid} -> {} (cpus {}) mode={}",
                         r.profile,
                         format_mask(mask),
@@ -272,54 +252,47 @@ impl Engine {
                     ));
                 }
                 Err(err) => {
-                    log(&format!("denied {name} pid {pid}: cannot set affinity (error {err})"));
-                    unsafe { CloseHandle(handle) };
-                    t.handle = null_mut();
+                    self.sys.log(&format!(
+                        "denied {name} pid {pid}: cannot set affinity (error {err})"
+                    ));
+                    self.sys.close(handle);
                     t.state = State::Denied;
                 }
-            }
+            },
         }
         self.tracked.push(t);
     }
 
-    fn apply(&self, handle: HANDLE, rule: usize) -> Result<(), u32> {
-        let Some(res) = self.resolved[rule].as_ref() else { return Ok(()) };
+    fn apply(&mut self, handle: Handle, rule: usize) -> Result<(), u32> {
+        let Some(res) = self.resolved[rule].as_ref() else {
+            return Ok(());
+        };
         let mode = self.cfg.rules[rule].mode;
-        unsafe {
-            if mode != Mode::Cpusets && SetProcessAffinityMask(handle, res.mask as usize) == 0 {
-                return Err(GetLastError());
-            }
-            if mode != Mode::Affinity
-                && SetProcessDefaultCpuSets(handle, res.sets.as_ptr(), res.sets.len() as u32) == 0
-            {
-                return Err(GetLastError());
-            }
+        if mode != Mode::Cpusets {
+            self.sys.set_affinity(handle, res.mask)?;
+        }
+        if mode != Mode::Affinity {
+            self.sys.set_cpu_sets(handle, &res.sets)?;
         }
         Ok(())
     }
 
     /// Describes what was found when it differs from what the rule applied.
-    fn mismatch(&self, handle: HANDLE, rule: usize) -> Option<String> {
+    fn mismatch(&mut self, handle: Handle, rule: usize) -> Option<String> {
         let res = self.resolved[rule].as_ref()?;
         let mode = self.cfg.rules[rule].mode;
-        unsafe {
-            if mode != Mode::Cpusets {
-                let (mut process, mut system) = (0usize, 0usize);
-                if GetProcessAffinityMask(handle, &mut process, &mut system) != 0
-                    && process as u64 != res.mask
-                {
-                    return Some(format!("affinity {}", format_mask(process as u64)));
+        if mode != Mode::Cpusets {
+            if let Some(found) = self.sys.affinity(handle) {
+                if found != res.mask {
+                    return Some(format!("affinity {}", format_mask(found)));
                 }
             }
-            if mode != Mode::Affinity {
-                let mut ids = [0u32; 64];
-                let mut count = 0u32;
-                if GetProcessDefaultCpuSets(handle, ids.as_mut_ptr(), 64, &mut count) != 0 {
-                    let mut found = ids[..count as usize].to_vec();
-                    found.sort_unstable();
-                    if found != res.sets {
-                        return Some(format!("cpusets {} ids", found.len()));
-                    }
+        }
+        if mode != Mode::Affinity {
+            if let Some(mut found) = self.sys.cpu_sets(handle) {
+                found.sort_unstable();
+                if found != res.sets {
+                    return Some(format!("cpusets {} ids", found.len()));
                 }
             }
         }
@@ -328,19 +301,23 @@ impl Engine {
 
     fn check(&mut self, i: usize) {
         let t = &self.tracked[i];
-        if t.state != State::Ok || t.handle.is_null() || !self.cfg.rules[t.rule].enforce {
+        if t.state != State::Ok || !self.cfg.rules[t.rule].enforce {
             return;
         }
-        let Some(found) = self.mismatch(t.handle, t.rule) else { return };
-        let (handle, rule, pid) = (t.handle, t.rule, t.pid);
+        let Some(handle) = t.handle else { return };
+        let (rule, pid) = (t.rule, t.pid);
         let name = file_name(&t.path).to_string();
         let since = t.last_apply.elapsed().as_secs_f32();
-        let expected = self.resolved[rule].as_ref().map(|r| format_mask(r.mask)).unwrap_or_default();
+        let Some(found) = self.mismatch(handle, rule) else {
+            return;
+        };
+        let expected =
+            self.resolved[rule].as_ref().map(|r| format_mask(r.mask)).unwrap_or_default();
         let now = Instant::now();
 
         if record_drift(&mut self.tracked[i].drifts, now) {
             self.tracked[i].state = State::Contested;
-            log(&format!(
+            self.sys.log(&format!(
                 "contested {name} pid {pid}: drifted more than {DRIFT_LIMIT} times in {}s, \
                  expected cpus {expected}, found {found}; no longer re-applying for this instance",
                 DRIFT_WINDOW.as_secs()
@@ -349,29 +326,23 @@ impl Engine {
         }
         let result = self.apply(handle, rule);
         self.tracked[i].last_apply = now;
-        match result {
-            Ok(()) => log(&format!(
-                "drift {name} pid {pid}: expected cpus {expected}, found {found}, \
-                 {since:.1}s since last apply; re-applied"
-            )),
-            Err(err) => log(&format!(
-                "drift {name} pid {pid}: expected cpus {expected}, found {found}, \
-                 {since:.1}s since last apply; re-apply failed (error {err})"
-            )),
-        }
+        let outcome = match result {
+            Ok(()) => "re-applied".to_string(),
+            Err(err) => format!("re-apply failed (error {err})"),
+        };
+        self.sys.log(&format!(
+            "drift {name} pid {pid}: expected cpus {expected}, found {found}, \
+             {since:.1}s since last apply; {outcome}"
+        ));
     }
 
-    fn release(&self, t: &Tracked, reset: bool) {
-        if t.handle.is_null() {
-            return;
+    fn release(&mut self, t: &Tracked, reset: bool) {
+        let Some(handle) = t.handle else { return };
+        if reset {
+            let _ = self.sys.set_affinity(handle, self.topo.all_mask);
+            let _ = self.sys.set_cpu_sets(handle, &[]);
         }
-        unsafe {
-            if reset {
-                SetProcessAffinityMask(t.handle, self.topo.all_mask as usize);
-                SetProcessDefaultCpuSets(t.handle, null(), 0);
-            }
-            CloseHandle(t.handle);
-        }
+        self.sys.close(handle);
     }
 
     /// Call after `self.cfg` changed. Everything tracked is reset to all
@@ -380,8 +351,12 @@ impl Engine {
         self.resolve();
         let tracked = std::mem::take(&mut self.tracked);
         for t in &tracked {
-            if self.find_rule(&t.path).is_none() && !t.handle.is_null() {
-                log(&format!("reset {} pid {} to all cores (rule removed)", file_name(&t.path), t.pid));
+            if self.find_rule(&t.path).is_none() && t.handle.is_some() {
+                self.sys.log(&format!(
+                    "reset {} pid {} to all cores (rule removed)",
+                    file_name(&t.path),
+                    t.pid
+                ));
             }
             self.release(t, true);
         }
@@ -389,23 +364,31 @@ impl Engine {
     }
 
     fn reload_from_disk(&mut self) {
-        self.cfg_mtime = config::mtime();
-        match config::load() {
+        self.cfg_mtime = config::mtime(&self.dir);
+        match config::load(&self.dir) {
             Ok(cfg) => {
                 self.cfg = cfg;
-                log(&format!("config reloaded: {} rule(s)", self.cfg.rules.len()));
+                self.sys.log(&format!("config reloaded: {} rule(s)", self.cfg.rules.len()));
                 self.config_changed();
             }
-            Err(e) => log(&format!("config error: {e}; keeping previous config")),
+            Err(e) => self.sys.log(&format!("config error: {e}; keeping previous config")),
         }
     }
 
     /// Persist `self.cfg` after an edit from the UI and apply it right away.
     pub fn save_and_apply(&mut self) {
-        if let Err(e) = config::save(&self.cfg) {
-            log(&format!("config error: cannot write config: {e}"));
+        // Never silently replace a file the user broke while editing it.
+        let path = config::path(&self.dir);
+        if path.exists() && config::load(&self.dir).is_err() {
+            let backup = self.dir.join("config.broken.json");
+            if std::fs::copy(&path, &backup).is_ok() {
+                self.sys.log(&format!("unreadable config kept as {}", backup.display()));
+            }
         }
-        self.cfg_mtime = config::mtime();
+        if let Err(e) = config::save(&self.dir, &self.cfg) {
+            self.sys.log(&format!("config error: cannot write config: {e}"));
+        }
+        self.cfg_mtime = config::mtime(&self.dir);
         self.config_changed();
         self.tick();
     }
@@ -415,7 +398,7 @@ impl Engine {
             return;
         }
         self.paused = paused;
-        log(if paused { "paused" } else { "resumed" });
+        self.sys.log(if paused { "paused" } else { "resumed" });
         if !paused {
             // Forget everything and rescan; pins set before the pause stay.
             let tracked = std::mem::take(&mut self.tracked);
@@ -442,55 +425,4 @@ impl Engine {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::Rule;
-
-    fn cfg(patterns: &[&str]) -> Config {
-        Config {
-            poll_interval_ms: 1000,
-            profiles: vec![],
-            rules: patterns
-                .iter()
-                .map(|p| Rule {
-                    pattern: p.to_string(),
-                    profile: "Cache".into(),
-                    mode: Mode::Affinity,
-                    enforce: true,
-                })
-                .collect(),
-        }
-    }
-
-    #[test]
-    fn matching() {
-        let c = cfg(&["foo.exe", "D:\\Games\\Foo\\foo.exe", "bar.exe"]);
-        // Full path beats file name even though it is listed later.
-        assert_eq!(match_rule(&c, "d:\\games\\foo\\FOO.exe", |_| true), Some(1));
-        assert_eq!(match_rule(&c, "C:\\other\\Foo.EXE", |_| true), Some(0));
-        assert_eq!(match_rule(&c, "C:\\x\\bar.exe", |_| true), Some(2));
-        assert_eq!(match_rule(&c, "C:\\x\\foobar.exe", |_| true), None);
-        // Unusable rules are skipped.
-        assert_eq!(match_rule(&c, "d:\\games\\foo\\foo.exe", |i| i != 1), Some(0));
-    }
-
-    #[test]
-    fn back_off_after_limit() {
-        let mut d = VecDeque::new();
-        let t0 = Instant::now();
-        for i in 0..DRIFT_LIMIT {
-            assert!(!record_drift(&mut d, t0 + Duration::from_secs(i as u64)));
-        }
-        // Sixth drift inside the window: contested.
-        assert!(record_drift(&mut d, t0 + Duration::from_secs(10)));
-    }
-
-    #[test]
-    fn slow_drift_is_not_contested() {
-        let mut d = VecDeque::new();
-        let t0 = Instant::now();
-        for i in 0..20 {
-            assert!(!record_drift(&mut d, t0 + Duration::from_secs(i * 15)));
-        }
-    }
-}
+mod tests;

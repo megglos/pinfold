@@ -30,7 +30,8 @@ pub fn log(msg: &str) {
     if ECHO.load(Ordering::Relaxed) {
         crate::win::say(&line);
     }
-    let path = crate::config::log_path();
+    let dir = crate::config::dir();
+    let path = crate::config::log_path(&dir);
     if let Ok(meta) = std::fs::metadata(&path) {
         if meta.len() > MAX_BYTES {
             let mut old = path.clone().into_os_string();
@@ -39,7 +40,7 @@ pub fn log(msg: &str) {
             let _ = std::fs::rename(&path, &old);
         }
     } else {
-        let _ = std::fs::create_dir_all(crate::config::dir());
+        let _ = std::fs::create_dir_all(&dir);
     }
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         let _ = writeln!(f, "{line}");

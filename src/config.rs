@@ -1,7 +1,7 @@
 //! Config file: load, validate, save (atomic), locate.
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::topology::Topology;
@@ -117,20 +117,21 @@ pub fn dir() -> PathBuf {
     base.join("Pinfold")
 }
 
-pub fn path() -> PathBuf {
-    dir().join("config.json")
+pub fn path(dir: &Path) -> PathBuf {
+    dir.join("config.json")
 }
 
-pub fn log_path() -> PathBuf {
-    dir().join("pinfold.log")
+pub fn log_path(dir: &Path) -> PathBuf {
+    dir.join("pinfold.log")
 }
 
-pub fn mtime() -> Option<SystemTime> {
-    std::fs::metadata(path()).and_then(|m| m.modified()).ok()
+pub fn mtime(dir: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path(dir)).and_then(|m| m.modified()).ok()
 }
 
-pub fn load() -> Result<Config, String> {
-    let text = std::fs::read_to_string(path()).map_err(|e| format!("cannot read config: {e}"))?;
+pub fn load(dir: &Path) -> Result<Config, String> {
+    let text =
+        std::fs::read_to_string(path(dir)).map_err(|e| format!("cannot read config: {e}"))?;
     // Tolerate a UTF-8 BOM written by some editors.
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
     serde_json::from_str(text).map_err(|e| format!("config.json: {e}"))
@@ -138,32 +139,33 @@ pub fn load() -> Result<Config, String> {
 
 /// Load the config; on first run create it from the topology.
 /// A broken file is never overwritten: defaults are used in memory only.
-pub fn load_or_create(topo: &Topology) -> Config {
-    if !path().exists() {
+/// The second value is a message for the log, if anything noteworthy happened.
+pub fn load_or_create(dir: &Path, topo: &Topology) -> (Config, Option<String>) {
+    if !path(dir).exists() {
         let cfg = Config::defaults(topo);
-        match save(&cfg) {
-            Ok(()) => crate::log::log(&format!("created {}", path().display())),
-            Err(e) => crate::log::log(&format!("config error: cannot write config: {e}")),
-        }
-        return cfg;
+        let note = match save(dir, &cfg) {
+            Ok(()) => format!("created {}", path(dir).display()),
+            Err(e) => format!("config error: cannot write config: {e}"),
+        };
+        return (cfg, Some(note));
     }
-    match load() {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            crate::log::log(&format!("config error: {e}; using defaults, no rules active"));
-            Config::defaults(topo)
-        }
+    match load(dir) {
+        Ok(cfg) => (cfg, None),
+        Err(e) => (
+            Config::defaults(topo),
+            Some(format!("config error: {e}; using defaults, no rules active")),
+        ),
     }
 }
 
 /// Atomic write: temp file, then replace.
-pub fn save(cfg: &Config) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir())?;
+pub fn save(dir: &Path, cfg: &Config) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
     let mut text = serde_json::to_string_pretty(cfg).map_err(std::io::Error::other)?;
     text.push('\n');
-    let tmp = dir().join("config.json.tmp");
+    let tmp = dir.join("config.json.tmp");
     std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, path())
+    std::fs::rename(&tmp, path(dir))
 }
 
 #[cfg(test)]

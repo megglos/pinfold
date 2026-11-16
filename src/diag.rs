@@ -69,8 +69,8 @@ impl Key {
                     u32::from_le_bytes([d[0], d[1], d[2], d[3]]).to_string()
                 }
                 REG_SZ => {
-                    let w: Vec<u16> =
-                        d.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                    let (pairs, _) = d.as_chunks::<2>();
+                    let w: Vec<u16> = pairs.iter().map(|c| u16::from_le_bytes(*c)).collect();
                     format!("\"{}\"", from_wide(&w))
                 }
                 _ => format!("<type {ty}, {} bytes>", d.len()),

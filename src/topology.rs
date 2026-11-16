@@ -45,7 +45,7 @@ fn for_each_lpi_record(relation: i32, mut f: impl FnMut(&[u8])) {
         if len == 0 {
             return;
         }
-        let mut buf = vec![0u64; (len as usize + 7) / 8];
+        let mut buf = vec![0u64; (len as usize).div_ceil(8)];
         if GetLogicalProcessorInformationEx(relation, buf.as_mut_ptr() as *mut _, &mut len) == 0 {
             return;
         }
@@ -90,7 +90,7 @@ pub fn read() -> Topology {
         let mut len = 0u32;
         GetSystemCpuSetInformation(null_mut(), 0, &mut len, null_mut(), 0);
         if len > 0 {
-            let mut buf = vec![0u64; (len as usize + 7) / 8];
+            let mut buf = vec![0u64; (len as usize).div_ceil(8)];
             if GetSystemCpuSetInformation(buf.as_mut_ptr() as *mut _, len, &mut len, null_mut(), 0)
                 != 0
             {
@@ -195,7 +195,11 @@ pub fn format_mask(mask: u64) -> String {
         }
         i += 1;
     }
-    if parts.is_empty() { "none".into() } else { parts.join(",") }
+    if parts.is_empty() {
+        "none".into()
+    } else {
+        parts.join(",")
+    }
 }
 
 #[cfg(test)]
@@ -219,10 +223,7 @@ mod tests {
     fn default_profiles_dual_ccd() {
         let t = Topology {
             all_mask: 0xFFFF_FFFF,
-            l3: vec![
-                L3 { size: 96 << 20, mask: 0xFFFF },
-                L3 { size: 32 << 20, mask: 0xFFFF_0000 },
-            ],
+            l3: vec![L3 { size: 96 << 20, mask: 0xFFFF }, L3 { size: 32 << 20, mask: 0xFFFF_0000 }],
             physical_cores: 16,
             cpu_sets: vec![],
         };

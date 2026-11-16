@@ -58,6 +58,31 @@ different size exist, and "All cores".
 Games that run elevated need Pinfold to run elevated too; otherwise the rule
 shows as "denied".
 
+## Tests
+
+```
+cargo test
+```
+
+Three layers, all run by CI on every push (`.github/workflows/ci.yml`,
+together with `cargo fmt --check` and `cargo clippy -D warnings`):
+
+- **Unit tests** (`src/**`): CPU range parsing, default profiles, config
+  parsing, rule matching, the back-off window.
+- **Engine tests** (`src/engine/tests.rs`): the engine only talks to the
+  operating system through the `System` trait, so these run it against a fake
+  with scripted processes: apply, drift, back-off, denied, process exit and
+  PID reuse, config reload, pause. No real process is touched.
+- **Integration tests** (`tests/`): run the real `Pinfold.exe` with
+  `PINFOLD_DIR` pointing at a private directory. `cli.rs` covers the command
+  line; `pinning.rs` starts the engine and real target processes (copies of
+  the binary under unique names) and checks their actual affinity mask and
+  CPU Sets through the Windows API.
+
+The tests never read or write `%AppData%\Pinfold` and do not interfere with
+an installed, running Pinfold. Not covered by automated tests: the tray menu
+and the dialogs (drag and drop, file picker, autostart toggle).
+
 ## Status
 
 First milestone. Implemented: topology, profiles, rules, polling, apply
@@ -70,4 +95,3 @@ Not yet implemented from the spec:
 - elevated autostart through Task Scheduler (9.3); "Start with Windows" uses the unelevated `HKCU\...\Run` variant
 - foreground window listed first in Assign (F14)
 - start-time check against PID reuse for unmatched processes (F6); matched processes are safe because their handle stays open
-- engine tests against a fake process source (9.4)

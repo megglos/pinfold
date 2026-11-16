@@ -11,6 +11,7 @@ mod config;
 mod diag;
 mod engine;
 mod log;
+mod sys;
 mod topology;
 mod tray;
 mod win;
@@ -37,7 +38,10 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match args.first().map(String::as_str) {
         None => tray::run(),
-        Some(cmd @ ("run" | "add" | "remove" | "list" | "topology" | "help" | "--help" | "-h" | "/?")) => {
+        Some(
+            cmd
+            @ ("run" | "add" | "remove" | "list" | "topology" | "help" | "--help" | "-h" | "/?"),
+        ) => {
             win::console_init();
             match cmd {
                 "run" => cmd_run(),
@@ -61,15 +65,34 @@ fn main() {
     std::process::exit(code);
 }
 
-fn load_config() -> Config {
-    config::load_or_create(&topology::read())
+/// Loads the config for a short-lived instance, creating it on first run.
+/// A config that exists but cannot be parsed is reported and left alone,
+/// so that a command never overwrites a file the user is in the middle of
+/// editing.
+fn load_config(gui: bool) -> Option<Config> {
+    let dir = config::dir();
+    if !config::path(&dir).exists() {
+        return Some(config::load_or_create(&dir, &topology::read()).0);
+    }
+    match config::load(&dir) {
+        Ok(cfg) => Some(cfg),
+        Err(e) => {
+            let msg = format!("{e}\nFix or delete {} and try again.", config::path(&dir).display());
+            if gui {
+                message_box(&msg);
+            } else {
+                say(&msg);
+            }
+            None
+        }
+    }
 }
 
 fn cmd_run() -> i32 {
     log::set_echo(true);
-    let mut engine = engine::Engine::new();
+    let mut engine = engine::Engine::new(sys::RealSystem, config::dir(), topology::read());
     diag::log_startup(&engine.topo);
-    say(&format!("config: {}", config::path().display()));
+    say(&format!("config: {}", config::path(&config::dir()).display()));
     say("polling; press Ctrl+C to stop");
     loop {
         engine.tick();
@@ -120,7 +143,9 @@ fn cmd_add(args: &[String]) -> i32 {
         say("only .exe paths or names are supported here");
         return 2;
     }
-    let mut cfg = load_config();
+    let Some(mut cfg) = load_config(false) else {
+        return 1;
+    };
     let wanted = profile.unwrap_or_else(|| "Cache".to_string());
     let Some(profile) = cfg.profile(&wanted).map(|p| p.name.clone()) else {
         let names: Vec<&str> = cfg.profiles.iter().map(|p| p.name.as_str()).collect();
@@ -129,14 +154,11 @@ fn cmd_add(args: &[String]) -> i32 {
     };
     let pattern = pattern_for(&path, full_path);
     let created = cfg.upsert_rule(&pattern, &profile, mode);
-    if let Err(e) = config::save(&cfg) {
+    if let Err(e) = config::save(&config::dir(), &cfg) {
         say(&format!("cannot write config: {e}"));
         return 1;
     }
-    say(&format!(
-        "{} rule: {pattern} -> {profile}",
-        if created { "added" } else { "updated" }
-    ));
+    say(&format!("{} rule: {pattern} -> {profile}", if created { "added" } else { "updated" }));
     0
 }
 
@@ -145,14 +167,16 @@ fn cmd_remove(args: &[String]) -> i32 {
         say(USAGE);
         return 2;
     };
-    let mut cfg = load_config();
+    let Some(mut cfg) = load_config(false) else {
+        return 1;
+    };
     let index = cfg.rule_index(arg).or_else(|| cfg.rule_index(file_name(arg)));
     let Some(i) = index else {
         say(&format!("no rule for '{arg}'"));
         return 1;
     };
     let removed = cfg.rules.remove(i);
-    if let Err(e) = config::save(&cfg) {
+    if let Err(e) = config::save(&config::dir(), &cfg) {
         say(&format!("cannot write config: {e}"));
         return 1;
     }
@@ -161,8 +185,10 @@ fn cmd_remove(args: &[String]) -> i32 {
 }
 
 fn cmd_list() -> i32 {
-    let cfg = load_config();
-    say(&format!("config: {}", config::path().display()));
+    let Some(cfg) = load_config(false) else {
+        return 1;
+    };
+    say(&format!("config: {}", config::path(&config::dir()).display()));
     say("profiles:");
     for p in &cfg.profiles {
         say(&format!("  {:<12} cpus {}", p.name, p.cpus));
@@ -218,7 +244,9 @@ fn cmd_drop(path: &str) -> i32 {
         message_box(&format!("Not an executable:\n{path}\n\n{USAGE}"));
         return 2;
     }
-    let mut cfg = load_config();
+    let Some(mut cfg) = load_config(true) else {
+        return 1;
+    };
     let name = file_name(path).to_string();
     let profiles: Vec<String> = cfg.profiles.iter().map(|p| p.name.clone()).collect();
     let picked = unsafe {
@@ -227,7 +255,7 @@ fn cmd_drop(path: &str) -> i32 {
     };
     let Some(profile) = picked else { return 0 };
     cfg.upsert_rule(&name, &profile, None);
-    if let Err(e) = config::save(&cfg) {
+    if let Err(e) = config::save(&config::dir(), &cfg) {
         message_box(&format!("Cannot write config: {e}"));
         return 1;
     }

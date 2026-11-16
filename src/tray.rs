@@ -24,18 +24,18 @@ use windows_sys::Win32::UI::Shell::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-    DispatchMessageW, EnumWindows, GetCursorPos, GetMessageW, GetWindow, GetWindowTextLengthW,
-    GetSystemMetrics, GetWindowThreadProcessId, IsWindowVisible, KillTimer, LoadIconW,
-    LoadImageW, PostMessageW, IMAGE_ICON, LR_SHARED, SM_CXSMICON, SM_CYSMICON,
-    PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SetForegroundWindow, SetTimer,
-    TrackPopupMenu, TranslateMessage, GW_OWNER, HMENU, IDI_APPLICATION, MF_CHECKED, MF_GRAYED,
-    MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, SW_SHOWNORMAL, TPM_NONOTIFY, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON, WM_APP, WM_DESTROY, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_TIMER,
-    WNDCLASSW,
+    DispatchMessageW, EnumWindows, GetCursorPos, GetMessageW, GetSystemMetrics, GetWindow,
+    GetWindowTextLengthW, GetWindowThreadProcessId, IsWindowVisible, KillTimer, LoadIconW,
+    LoadImageW, PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW,
+    SetForegroundWindow, SetTimer, TrackPopupMenu, TranslateMessage, GW_OWNER, HMENU,
+    IDI_APPLICATION, IMAGE_ICON, LR_SHARED, MF_CHECKED, MF_GRAYED, MF_POPUP, MF_SEPARATOR,
+    MF_STRING, MSG, SM_CXSMICON, SM_CYSMICON, SW_SHOWNORMAL, TPM_NONOTIFY, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, WM_APP, WM_DESTROY, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
 };
 
 use crate::config::{self, Mode};
-use crate::engine::{process_info, Engine};
+use crate::sys::{process_info, RealSystem};
+type Engine = crate::engine::Engine<RealSystem>;
 use crate::win::{file_name, from_wide, message_box, wide};
 
 const WM_TRAY: u32 = WM_APP + 1;
@@ -51,11 +51,24 @@ static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 
 enum Action {
     /// Create or update the file-name rule for this executable path.
-    Assign { path: String, profile: String },
-    SetProfile { pattern: String, profile: String },
-    SetMode { pattern: String, mode: Mode },
-    ToggleEnforce { pattern: String },
-    Remove { pattern: String },
+    Assign {
+        path: String,
+        profile: String,
+    },
+    SetProfile {
+        pattern: String,
+        profile: String,
+    },
+    SetMode {
+        pattern: String,
+        mode: Mode,
+    },
+    ToggleEnforce {
+        pattern: String,
+    },
+    Remove {
+        pattern: String,
+    },
     AddProgram,
     TogglePause,
     OpenConfig,
@@ -122,12 +135,7 @@ pub unsafe fn pick_profile(hwnd: HWND, exe_name: &str, profiles: &[String]) -> O
     m.item(menu, &format!("Pin {exe_name} to:"), false, Action::Nothing);
     m.sep(menu);
     for p in profiles {
-        m.item(
-            menu,
-            p,
-            false,
-            Action::Assign { path: exe_name.to_string(), profile: p.clone() },
-        );
+        m.item(menu, p, false, Action::Assign { path: exe_name.to_string(), profile: p.clone() });
     }
     match track(hwnd, menu, m) {
         Action::Assign { profile, .. } => Some(profile),
@@ -174,7 +182,7 @@ fn windowed_processes() -> Vec<String> {
     let mut pids: Vec<u32> = Vec::new();
     unsafe { EnumWindows(Some(enum_windows_cb), &mut pids as *mut Vec<u32> as LPARAM) };
     let mut procs: Vec<(String, u64)> = pids.into_iter().filter_map(process_info).collect();
-    procs.sort_by(|a, b| b.1.cmp(&a.1));
+    procs.sort_by_key(|p| std::cmp::Reverse(p.1));
     let mut seen: Vec<String> = Vec::new();
     procs.retain(|(path, _)| {
         let key = path.to_lowercase();
@@ -320,8 +328,8 @@ unsafe fn handle(hwnd: HWND, action: Action) {
             with_engine(|e| e.set_paused(!e.paused));
             update_icon(hwnd, NIM_MODIFY);
         }
-        Action::OpenConfig => open(&config::path().to_string_lossy()),
-        Action::OpenLog => open(&config::log_path().to_string_lossy()),
+        Action::OpenConfig => open(&config::path(&config::dir()).to_string_lossy()),
+        Action::OpenLog => open(&config::log_path(&config::dir()).to_string_lossy()),
         Action::ToggleAutostart => set_autostart(!autostart_enabled()),
         Action::Exit => {
             DestroyWindow(hwnd);
@@ -382,7 +390,9 @@ fn run_key(access: u32) -> Option<HKEY> {
 }
 
 fn autostart_enabled() -> bool {
-    let Some(h) = run_key(KEY_READ) else { return false };
+    let Some(h) = run_key(KEY_READ) else {
+        return false;
+    };
     let rc = unsafe {
         RegQueryValueExW(h, wide(RUN_VALUE).as_ptr(), null(), null_mut(), null_mut(), null_mut())
     };
@@ -391,7 +401,9 @@ fn autostart_enabled() -> bool {
 }
 
 fn set_autostart(on: bool) {
-    let Some(h) = run_key(KEY_SET_VALUE) else { return };
+    let Some(h) = run_key(KEY_SET_VALUE) else {
+        return;
+    };
     unsafe {
         if on {
             let exe = std::env::current_exe().unwrap_or_default();
@@ -496,7 +508,7 @@ pub fn run() -> i32 {
             return 0;
         }
 
-        let engine = Engine::new();
+        let engine = Engine::new(RealSystem, config::dir(), crate::topology::read());
         crate::diag::log_startup(&engine.topo);
         ENGINE.with(|e| *e.borrow_mut() = Some(engine));
 
