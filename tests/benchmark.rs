@@ -53,7 +53,8 @@ fn rule_count(s: &Sandbox) -> usize {
     cfg["rules"].as_array().unwrap().len()
 }
 
-const FAST: &[&str] = &["--seconds", "1", "--settle", "0", "--countdown", "0"];
+/// Short captures; the test targets have no window, so focus is ignored.
+const FAST: &[&str] = &["--seconds", "1", "--settle", "0", "--countdown", "0", "--ignore-focus"];
 
 #[test]
 fn compares_profiles_and_leaves_no_trace_when_there_was_no_rule() {
@@ -111,6 +112,37 @@ fn compares_profiles_and_leaves_no_trace_when_there_was_no_rule() {
     // No rule existed before: none afterwards, and the program is unpinned.
     assert_eq!(rule_count(&s), 0);
     assert_eq!(p.affinity(), p.system_mask());
+}
+
+#[test]
+fn waits_for_the_game_to_be_in_front_and_stops_when_it_exits() {
+    let s = Sandbox::new();
+    write_config(&s, "");
+    let pm = fake_presentmon(&s, CAPTURING);
+    // The test target has no window, so it never comes to the front.
+    let target = s.target();
+    let p = target.start();
+    wait_for("target visible", TIMEOUT, || p.affinity() != 0);
+    let bench = s.spawn(&[
+        "benchmark",
+        &target.name,
+        "--presentmon",
+        pm.to_str().unwrap(),
+        "--seconds",
+        "1",
+        "--settle",
+        "0",
+        "--countdown",
+        "0",
+    ]);
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    drop(p); // ends the target
+    let out = bench.wait_with_output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert_eq!(out.status.code(), Some(1), "{text}");
+    assert!(text.contains("Waiting for") && text.contains("no longer running"), "{text}");
+    assert!(!text.contains("round 1"), "nothing was captured: {text}");
+    assert_eq!(rule_count(&s), 0);
 }
 
 #[test]

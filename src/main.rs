@@ -282,7 +282,14 @@ fn cmd_benchmark(args: &[String]) -> i32 {
             return 2;
         }
     };
-    let code = match bench::run(&opts) {
+    unsafe {
+        windows_sys::Win32::System::Console::SetConsoleCtrlHandler(Some(on_console_ctrl), 1);
+    }
+    let code = match bench::run(&opts, &ConsoleUi, &CANCEL) {
+        Err(bench::Failure::Cancelled) => {
+            say("Benchmark cancelled. The rule is as it was before.");
+            1
+        }
         Ok(outcome) => {
             say("");
             say(&outcome.report);
@@ -319,6 +326,36 @@ fn cmd_benchmark(args: &[String]) -> i32 {
         win::wait_for_enter();
     }
     code
+}
+
+static CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Ctrl+C or closing the window cancels the benchmark, so that the rule is
+/// put back instead of being left on whatever profile was being measured.
+unsafe extern "system" fn on_console_ctrl(event: u32) -> windows_sys::Win32::Foundation::BOOL {
+    CANCEL.store(true, std::sync::atomic::Ordering::Relaxed);
+    if event == windows_sys::Win32::System::Console::CTRL_CLOSE_EVENT {
+        // The process ends when this returns: give the benchmark time to
+        // notice and restore the rule.
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+    1
+}
+
+/// The benchmark in a console: lines on stdout, progress in the title.
+struct ConsoleUi;
+
+impl bench::Ui for ConsoleUi {
+    fn say(&self, line: &str) {
+        say(line);
+    }
+    fn status(&self, text: &str) {
+        let title = win::wide(&format!("Pinfold benchmark - {text}"));
+        unsafe { windows_sys::Win32::System::Console::SetConsoleTitleW(title.as_ptr()) };
+    }
+    fn sound(&self, sound: bench::Sound) {
+        bench::play(sound);
+    }
 }
 
 /// After a clear result: make the winner the rule, if the user agrees.

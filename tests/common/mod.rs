@@ -51,6 +51,12 @@ impl Sandbox {
         self.command(args).output().expect("cannot run Pinfold.exe")
     }
 
+    /// Start a command without waiting; stdout is collected.
+    #[allow(dead_code)] // not every test binary uses it
+    pub fn spawn(&self, args: &[&str]) -> std::process::Child {
+        self.command(args).stdout(Stdio::piped()).spawn().expect("cannot run Pinfold.exe")
+    }
+
     /// Like `run`, but returns stdout and asserts the exit code.
     pub fn ok(&self, args: &[&str]) -> String {
         let out = self.run(args);

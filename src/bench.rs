@@ -6,8 +6,11 @@
 //! background instance the benchmark applies the affinity itself.
 //! Afterwards the rule is put back the way it was.
 
+use std::cell::Cell;
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::System::Diagnostics::Debug::MessageBeep;
@@ -17,7 +20,9 @@ use crate::engine::System;
 use crate::frametime::{self, Stats};
 use crate::sys::{affinity_of, pids_by_name, RealSystem};
 use crate::topology::{self, format_mask, Topology};
-use crate::win::{file_name, say};
+use crate::win::file_name;
+
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub const PRESENTMON_HELP: &str = "PresentMon was not found.\n\
      Download the PresentMon console application from\n\
@@ -34,6 +39,8 @@ pub struct Options {
     pub settle: u32,
     pub countdown: u32,
     pub presentmon: Option<String>,
+    /// Capture only while the target is the window in front.
+    pub focus: bool,
     /// Make the winner the rule without asking.
     pub apply: bool,
     /// Started from the tray menu: own console window, wait before closing.
@@ -58,6 +65,9 @@ impl Options {
         if let Some(p) = &self.presentmon {
             a.extend(["--presentmon".to_string(), p.clone()]);
         }
+        if !self.focus {
+            a.push("--ignore-focus".to_string());
+        }
         if self.apply {
             a.push("--apply".to_string());
         }
@@ -75,8 +85,9 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
         seconds: 60,
         rounds: 2,
         settle: 5,
-        countdown: 10,
+        countdown: 3,
         presentmon: None,
+        focus: true,
         apply: false,
         window: false,
     };
@@ -104,6 +115,7 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
                 o.presentmon = Some(it.next().ok_or("--presentmon needs a path")?.clone())
             }
             "--apply" => o.apply = true,
+            "--ignore-focus" => o.focus = false,
             "--window" => o.window = true,
             _ if a.starts_with("--") => return Err(format!("unknown option {a}")),
             _ if o.target.is_empty() => o.target = file_name(a).to_string(),
@@ -177,8 +189,51 @@ pub fn find_presentmon(explicit: Option<&str>, search: &[PathBuf]) -> Result<Pat
     Err(PRESENTMON_HELP.to_string())
 }
 
+/// What the benchmark tells the person running it: a console, or the tray.
+pub trait Ui {
+    /// A line of progress (console output or the log).
+    fn say(&self, line: &str);
+    /// Short state for a title bar or a tooltip.
+    fn status(&self, text: &str);
+    fn sound(&self, sound: Sound);
+}
+
+/// The player is in the game while the benchmark runs: sounds are the
+/// signals that reach them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Sound {
+    /// The first capture starts.
+    Start,
+    /// The next profile is being captured.
+    Switch,
+    /// Something needs attention (focus lost, failure).
+    Problem,
+    Done,
+}
+
+pub fn play(sound: Sound) {
+    // MB_OK, MB_ICONEXCLAMATION, MB_ICONHAND, MB_ICONASTERISK: four sounds
+    // of the Windows sound scheme.
+    let kind = match sound {
+        Sound::Switch => 0,
+        Sound::Start => 0x30,
+        Sound::Problem => 0x10,
+        Sound::Done => 0x40,
+    };
+    unsafe { MessageBeep(kind) };
+}
+
+/// Why a capture stopped before PresentMon finished.
+#[derive(Debug, PartialEq)]
+enum Interrupt {
+    Cancelled,
+    FocusLost,
+}
+
 struct Run<'a> {
     opts: &'a Options,
+    ui: &'a dyn Ui,
+    cancel: &'a AtomicBool,
     dir: PathBuf,
     cfg: Config,
     topo: Topology,
@@ -188,15 +243,66 @@ struct Run<'a> {
     background: bool,
 }
 
-fn beep() {
-    unsafe { MessageBeep(0) };
-}
-
-fn sleep_secs(s: u32) {
-    std::thread::sleep(Duration::from_secs(s as u64));
+/// Process id of the window in front.
+fn foreground_pid() -> u32 {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowThreadProcessId,
+    };
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        let mut pid = 0u32;
+        if !hwnd.is_null() {
+            GetWindowThreadProcessId(hwnd, &mut pid);
+        }
+        pid
+    }
 }
 
 impl Run<'_> {
+    fn cancelled(&self) -> Result<(), Failure> {
+        if self.cancel.load(Ordering::Relaxed) {
+            Err(Failure::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Sleep that a cancel ends early, with a countdown in the status.
+    fn pause(&self, secs: u32, status: &str) -> Result<(), Failure> {
+        for left in (1..=secs).rev() {
+            self.ui.status(&format!("{status} in {left} s"));
+            for _ in 0..10 {
+                self.cancelled()?;
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+        self.cancelled()
+    }
+
+    fn in_front(&self) -> bool {
+        pids_by_name(&self.opts.target).contains(&foreground_pid())
+    }
+
+    /// Captures only count while the game is the window in front.
+    fn wait_for_focus(&self) -> Result<(), Failure> {
+        if !self.opts.focus || self.in_front() {
+            return Ok(());
+        }
+        let target = &self.opts.target;
+        self.ui.say(&format!("Waiting for {target} to be in front - switch to it."));
+        self.ui.status(&format!("waiting for {target} to be in front"));
+        loop {
+            self.cancelled()?;
+            if pids_by_name(target).is_empty() {
+                return Err(format!("{target} is no longer running").into());
+            }
+            if self.in_front() {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+
     fn mask_of(&self, profile: &str) -> Result<u64, String> {
         let p = self.cfg.profile(profile).ok_or(format!("unknown profile '{profile}'"))?;
         let mask = topology::parse_cpus(&p.cpus)? & self.topo.all_mask;
@@ -260,39 +366,94 @@ impl Run<'_> {
         }
     }
 
-    fn capture(&self, round: u32, profile: &str) -> Result<Vec<f64>, String> {
+    /// Capture `profile` (already applied) while the game is in front. A
+    /// capture during which the game lost focus for more than a second is
+    /// thrown away and repeated.
+    fn capture(&self, round: u32, profile: &str, label: &str) -> Result<Vec<f64>, Failure> {
+        let target = &self.opts.target;
         let safe: String =
             profile.chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).collect();
         let csv = self.out_dir.join(format!("round{round}-{safe}.csv"));
-        let _ = std::fs::remove_file(&csv);
-        presentmon_capture(&self.presentmon, &csv, self.opts.seconds).map_err(|e| e.message())?;
+        loop {
+            self.wait_for_focus()?;
+            self.pause(self.opts.settle, &format!("{label}: capture starts"))?;
+            let game = pids_by_name(target);
+            let started = Instant::now();
+            let lost_since: Cell<Option<Instant>> = Cell::new(None);
+            let shown = Cell::new(u64::MAX);
+            let watch = || {
+                if self.cancel.load(Ordering::Relaxed) {
+                    return Some(Interrupt::Cancelled);
+                }
+                let left = (self.opts.seconds as u64).saturating_sub(started.elapsed().as_secs());
+                if shown.replace(left) != left {
+                    self.ui.status(&format!("{label}: {left} s left"));
+                }
+                if self.opts.focus && !game.contains(&foreground_pid()) {
+                    let since = lost_since.get().unwrap_or_else(Instant::now);
+                    lost_since.set(Some(since));
+                    if since.elapsed() > Duration::from_secs(1) {
+                        return Some(Interrupt::FocusLost);
+                    }
+                } else {
+                    lost_since.set(None);
+                }
+                None
+            };
+            let _ = std::fs::remove_file(&csv);
+            match presentmon_capture(&self.presentmon, &csv, self.opts.seconds, &watch) {
+                Ok(()) => break,
+                Err(CaptureError::Interrupted(Interrupt::Cancelled)) => {
+                    return Err(Failure::Cancelled)
+                }
+                Err(CaptureError::Interrupted(Interrupt::FocusLost)) => {
+                    self.ui.sound(Sound::Problem);
+                    self.ui.say(&format!(
+                        "{target} was not in front: this capture is repeated once it is back."
+                    ));
+                }
+                Err(e) => return Err(e.message().into()),
+            }
+        }
         let text = std::fs::read_to_string(&csv)
             .map_err(|_| format!("PresentMon wrote no capture file ({})", csv.display()))?;
-        frametime::parse_csv(&text, &self.opts.target).map_err(|e| {
-            format!("{e} ({}). Was {} in front and rendering?", csv.display(), self.opts.target)
-        })
+        let times = frametime::parse_csv(&text, target).map_err(|e| {
+            format!("{e} ({}). Was {target} in front and rendering?", csv.display())
+        })?;
+        Ok(times)
     }
 }
 
-/// Why a PresentMon run failed, with what PresentMon itself said.
-pub struct CaptureError {
-    code: Option<i32>,
-    output: String,
+/// Why a PresentMon run did not produce a capture.
+enum CaptureError {
+    Failed { code: Option<i32>, output: String },
+    Interrupted(Interrupt),
 }
 
 impl CaptureError {
-    /// PresentMon could not start its trace session for lack of rights.
-    pub fn is_access_denied(&self) -> bool {
-        self.output.to_lowercase().contains("access denied")
+    fn failed(output: impl Into<String>) -> CaptureError {
+        CaptureError::Failed { code: None, output: output.into() }
     }
 
-    pub fn message(&self) -> String {
-        let said = self.output.trim();
-        let code = self.code.map(|c| c.to_string()).unwrap_or_else(|| "none".into());
-        if said.is_empty() {
-            format!("PresentMon failed (exit code {code}) without a message.")
-        } else {
-            format!("PresentMon failed (exit code {code}):\n{said}")
+    /// PresentMon could not start its trace session for lack of rights.
+    fn is_access_denied(&self) -> bool {
+        matches!(self, CaptureError::Failed { output, .. }
+            if output.to_lowercase().contains("access denied"))
+    }
+
+    fn message(&self) -> String {
+        match self {
+            CaptureError::Interrupted(Interrupt::Cancelled) => "cancelled".into(),
+            CaptureError::Interrupted(Interrupt::FocusLost) => "the game lost focus".into(),
+            CaptureError::Failed { code, output } => {
+                let said = output.trim();
+                let code = code.map(|c| c.to_string()).unwrap_or_else(|| "none".into());
+                if said.is_empty() {
+                    format!("PresentMon failed (exit code {code}) without a message.")
+                } else {
+                    format!("PresentMon failed (exit code {code}):\n{said}")
+                }
+            }
         }
     }
 }
@@ -300,11 +461,17 @@ impl CaptureError {
 /// One timed PresentMon capture into `csv`. Every program is captured and
 /// the target is picked out afterwards: that way a capture without the
 /// target still says who was presenting instead of producing no file.
-fn presentmon_capture(presentmon: &Path, csv: &Path, seconds: u32) -> Result<(), CaptureError> {
-    let fail = |code: Option<i32>, output: String| CaptureError { code, output };
+/// `watch` is asked ten times a second whether to stop early.
+fn presentmon_capture(
+    presentmon: &Path,
+    csv: &Path,
+    seconds: u32,
+    watch: &dyn Fn() -> Option<Interrupt>,
+) -> Result<(), CaptureError> {
     // PresentMon reports problems on stderr; keep it for the error message.
     let err_path = csv.with_extension("presentmon.txt");
-    let err_file = std::fs::File::create(&err_path).map_err(|e| fail(None, e.to_string()))?;
+    let err_file =
+        std::fs::File::create(&err_path).map_err(|e| CaptureError::failed(e.to_string()))?;
     let mut child = Command::new(presentmon)
         .arg("--output_file")
         .arg(csv)
@@ -314,18 +481,30 @@ fn presentmon_capture(presentmon: &Path, csv: &Path, seconds: u32) -> Result<(),
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::from(err_file))
+        .creation_flags(CREATE_NO_WINDOW)
         .spawn()
-        .map_err(|e| fail(None, format!("cannot start {}: {e}", presentmon.display())))?;
+        .map_err(|e| CaptureError::failed(format!("cannot start {}: {e}", presentmon.display())))?;
     let deadline = Instant::now() + Duration::from_secs(seconds as u64 + 30);
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() > deadline => {
                 let _ = child.kill();
-                return Err(fail(None, "PresentMon did not finish in time".into()));
+                return Err(CaptureError::failed("PresentMon did not finish in time"));
             }
-            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
-            Err(e) => return Err(fail(None, format!("waiting for PresentMon failed: {e}"))),
+            Ok(None) => {
+                if let Some(why) = watch() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = std::fs::remove_file(&err_path);
+                    let _ = std::fs::remove_file(csv);
+                    return Err(CaptureError::Interrupted(why));
+                }
+                std::thread::sleep(Duration::from_millis(100))
+            }
+            Err(e) => {
+                return Err(CaptureError::failed(format!("waiting for PresentMon failed: {e}")))
+            }
         }
     };
     let output = std::fs::read_to_string(&err_path).unwrap_or_default();
@@ -333,7 +512,7 @@ fn presentmon_capture(presentmon: &Path, csv: &Path, seconds: u32) -> Result<(),
         let _ = std::fs::remove_file(&err_path);
         Ok(())
     } else {
-        Err(fail(status.code(), output))
+        Err(CaptureError::Failed { code: status.code(), output })
     }
 }
 
@@ -342,6 +521,8 @@ pub enum Failure {
     /// PresentMon needs rights this process does not have; running the
     /// benchmark elevated will help.
     NeedsElevation,
+    /// Stopped on request; the rule is as before.
+    Cancelled,
     Message(String),
 }
 
@@ -383,12 +564,10 @@ fn restore(dir: &Path, target: &str, original: Option<Rule>, reset: Option<u64>)
     }
 }
 
-pub fn run(opts: &Options) -> Result<Outcome, Failure> {
-    let dir = config::dir();
-    let cfg = config::load(&dir)?;
-    let topo = topology::read();
+/// The profiles to compare, checked against the config.
+pub fn chosen_profiles(opts: &Options, cfg: &Config) -> Result<Vec<String>, String> {
     let profiles: Vec<String> = if opts.profiles.is_empty() {
-        default_profiles(&cfg)
+        default_profiles(cfg)
     } else {
         opts.profiles
             .iter()
@@ -398,6 +577,16 @@ pub fn run(opts: &Options) -> Result<Outcome, Failure> {
     if profiles.len() < 2 {
         return Err("a comparison needs at least two profiles".into());
     }
+    Ok(profiles)
+}
+
+/// Run the benchmark. `cancel` stops it at the next check (ten times a
+/// second); the rule is put back in every case.
+pub fn run(opts: &Options, ui: &dyn Ui, cancel: &AtomicBool) -> Result<Outcome, Failure> {
+    let dir = config::dir();
+    let cfg = config::load(&dir)?;
+    let topo = topology::read();
+    let profiles = chosen_profiles(opts, &cfg)?;
     let configured = opts.presentmon.clone().or(cfg.present_mon.clone());
     let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf));
     let search: Vec<PathBuf> = exe_dir.into_iter().chain([dir.clone()]).collect();
@@ -416,15 +605,18 @@ pub fn run(opts: &Options) -> Result<Outcome, Failure> {
 
     // One-second trial capture before anyone switches to the game: finds
     // missing rights and other PresentMon problems while they are cheap.
+    ui.status("checking PresentMon");
     let trial = out_dir.join("trial.csv");
-    let checked = presentmon_capture(&presentmon, &trial, 1);
+    let checked = presentmon_capture(&presentmon, &trial, 1, &|| {
+        cancel.load(Ordering::Relaxed).then_some(Interrupt::Cancelled)
+    });
     let _ = std::fs::remove_file(&trial);
     if let Err(e) = checked {
         let _ = std::fs::remove_dir_all(&out_dir);
-        return Err(if e.is_access_denied() && !crate::diag::is_elevated() {
-            Failure::NeedsElevation
-        } else {
-            Failure::Message(e.message())
+        return Err(match e {
+            CaptureError::Interrupted(Interrupt::Cancelled) => Failure::Cancelled,
+            e if e.is_access_denied() && !crate::diag::is_elevated() => Failure::NeedsElevation,
+            e => Failure::Message(e.message()),
         });
     }
 
@@ -432,8 +624,8 @@ pub fn run(opts: &Options) -> Result<Outcome, Failure> {
     let background = crate::tray::is_running();
     let plan = phases(&profiles, opts.rounds);
     let total = opts.countdown + plan.len() as u32 * (opts.settle + opts.seconds);
-    say(&format!("Benchmark of {}: {}", opts.target, profiles.join(" vs ")));
-    say(&format!(
+    ui.say(&format!("Benchmark of {}: {}", opts.target, profiles.join(" vs ")));
+    ui.say(&format!(
         "{} captures of {} s, about {} min {} s in total. PresentMon: {}",
         plan.len(),
         opts.seconds,
@@ -441,51 +633,62 @@ pub fn run(opts: &Options) -> Result<Outcome, Failure> {
         total % 60,
         presentmon.display()
     ));
-    say("Keep the game in front and the scene as constant as you can.");
-    say("A sound marks the start, every switch and the end.");
-    if opts.countdown > 0 {
-        say(&format!("Starting in {} s - switch to the game now.", opts.countdown));
-        sleep_secs(opts.countdown);
-    }
+    ui.say("Keep the game in front and the scene as constant as you can.");
+    ui.say("A sound marks the start, every switch and the end.");
 
-    let mut run = Run { opts, dir: dir.clone(), cfg, topo, presentmon, out_dir, background };
+    let mut run =
+        Run { opts, ui, cancel, dir: dir.clone(), cfg, topo, presentmon, out_dir, background };
     let mut frames: Vec<(String, Vec<f64>)> =
         profiles.iter().map(|p| (p.clone(), Vec::new())).collect();
     let mut rounds_text = String::new();
     let mut per_round: Vec<(u32, String, f64)> = Vec::new();
     let mut outcome = Ok(());
-    for (round, profile) in &plan {
-        beep();
+    let started = (|| {
+        run.wait_for_focus()?;
+        run.pause(opts.countdown, "benchmark starts")
+    })();
+    if let Err(e) = started {
+        outcome = Err(e);
+    }
+    for (i, (round, profile)) in plan.iter().enumerate() {
+        if outcome.is_err() {
+            break;
+        }
+        ui.sound(if i == 0 { Sound::Start } else { Sound::Switch });
+        let label = format!("capture {}/{}, {profile}", i + 1, plan.len());
         let step = (|| {
             run.switch(profile)?;
             let mask = run.mask_of(profile)?;
-            say(&format!("round {round}: {profile} (cpus {}) ...", format_mask(mask)));
-            sleep_secs(opts.settle);
-            let times = run.capture(*round, profile)?;
+            ui.say(&format!("round {round}: {profile} (cpus {}) ...", format_mask(mask)));
+            let times = run.capture(*round, profile, &label)?;
             let s = frametime::stats(&times).ok_or("the capture contains no frames")?;
             let line = format!(
                 "round {round}: {profile:<12} {:>8.1} avg FPS  {:>8.1} 1% low  {:>7.2} ms p99  ({} frames)",
                 s.avg_fps, s.low1_fps, s.p99_ms, s.frames
             );
-            say(&line);
+            ui.say(&line);
             rounds_text.push_str(&line);
             rounds_text.push('\n');
             per_round.push((*round, profile.clone(), s.avg_fps));
             if let Some((_, all)) = frames.iter_mut().find(|(p, _)| p == profile) {
                 all.extend(times);
             }
-            Ok::<(), String>(())
+            Ok::<(), Failure>(())
         })();
         if let Err(e) = step {
             outcome = Err(e);
-            break;
         }
     }
     let current = original.as_ref().map(|r| r.profile.clone());
     let reset = (!background && original.is_none()).then_some(run.topo.all_mask);
     restore(&dir, &opts.target, original, reset);
-    beep();
-    outcome.map_err(Failure::Message)?;
+    if let Err(e) = outcome {
+        if !matches!(e, Failure::Cancelled) {
+            ui.sound(Sound::Problem);
+        }
+        return Err(e);
+    }
+    ui.sound(Sound::Done);
 
     let columns: Vec<(String, Stats)> = frames
         .iter()
@@ -507,7 +710,7 @@ pub fn run(opts: &Options) -> Result<Outcome, Failure> {
     let report_path = run.out_dir.join("report.txt");
     let _ = std::fs::write(&report_path, &text);
     text.push_str(&format!("\nCaptures and this report: {}\n", run.out_dir.display()));
-    Ok(Outcome { report: text, verdict, current })
+    Ok(Outcome { report: text, verdict, current, report_path })
 }
 
 /// A finished benchmark.
@@ -517,6 +720,8 @@ pub struct Outcome {
     pub verdict: frametime::Verdict,
     /// The profile the rule had before the benchmark, if there was a rule.
     pub current: Option<String>,
+    #[allow(dead_code)] // read by the tray (next commit)
+    pub report_path: PathBuf,
 }
 
 impl Outcome {
@@ -551,8 +756,9 @@ mod tests {
     fn defaults() {
         let o = parse_args(&args(&["D:\\Games\\Game.exe"])).unwrap();
         assert_eq!(o.target, "Game.exe");
-        assert_eq!((o.seconds, o.rounds, o.settle, o.countdown), (60, 2, 5, 10));
+        assert_eq!((o.seconds, o.rounds, o.settle, o.countdown), (60, 2, 5, 3));
         assert!(o.profiles.is_empty() && o.presentmon.is_none() && !o.window);
+        assert!(o.focus && !o.apply);
     }
 
     #[test]
@@ -596,6 +802,8 @@ mod tests {
             "2",
             "--presentmon",
             "C:\\my tools\\pm.exe",
+            "--ignore-focus",
+            "--apply",
             "--window",
         ]))
         .unwrap();
@@ -606,14 +814,15 @@ mod tests {
 
     #[test]
     fn access_denied_is_recognised_from_what_presentmon_says() {
-        let denied = CaptureError {
+        let denied = CaptureError::Failed {
             code: Some(6),
             output: "error: failed to start trace session: access denied.\n".into(),
         };
         assert!(denied.is_access_denied());
         assert!(denied.message().contains("exit code 6"));
         assert!(denied.message().contains("failed to start trace session"));
-        let other = CaptureError { code: Some(5), output: String::new() };
+        let other = CaptureError::Failed { code: Some(5), output: String::new() };
+        assert!(!CaptureError::Interrupted(Interrupt::FocusLost).is_access_denied());
         assert!(!other.is_access_denied());
         assert!(other.message().contains("without a message"));
     }
