@@ -83,7 +83,8 @@ game between the profiles, captures the frame times in each with
 [PresentMon](https://github.com/GameTechDev/PresentMon/releases), and compares
 average FPS, 1 % and 0.1 % lows, and frame-time percentiles (p50, p95, p99,
 p99.9). There is no window: sounds mark the start, every switch, problems and
-the end, and the tray tooltip shows the progress. A capture during which the
+the end, the tray icon turns into a ring that fills up, and its tooltip
+says what is happening. A capture during which the
 game was not in front (Alt+Tab) is thrown away and repeated. "Stop benchmark"
 in the tray menu ends it early. The rule is put back the way it was in every
 case.

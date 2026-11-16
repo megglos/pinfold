@@ -196,6 +196,8 @@ pub trait Ui {
     /// Short state for a title bar or a tooltip.
     fn status(&self, text: &str);
     fn sound(&self, sound: Sound);
+    /// Share of the captures done, 0 to 1.
+    fn progress(&self, _done: f64) {}
 }
 
 /// The player is in the game while the benchmark runs: sounds are the
@@ -241,6 +243,8 @@ struct Run<'a> {
     out_dir: PathBuf,
     /// A background instance applies config changes; otherwise we do.
     background: bool,
+    /// Number of captures in the plan.
+    steps: usize,
 }
 
 /// Process id of the window in front.
@@ -371,6 +375,7 @@ impl Run<'_> {
     /// thrown away and repeated.
     fn capture(
         &self,
+        index: usize,
         round: u32,
         profile: &str,
         label: &str,
@@ -379,7 +384,9 @@ impl Run<'_> {
         let safe: String =
             profile.chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).collect();
         let csv = self.out_dir.join(format!("round{round}-{safe}.csv"));
+        let steps = self.steps.max(1) as f64;
         loop {
+            self.ui.progress(index as f64 / steps);
             self.wait_for_focus()?;
             self.pause(self.opts.settle, &format!("{label}: capture starts"))?;
             let game = pids_by_name(target);
@@ -393,6 +400,8 @@ impl Run<'_> {
                 let left = (self.opts.seconds as u64).saturating_sub(started.elapsed().as_secs());
                 if shown.replace(left) != left {
                     self.ui.status(&format!("{label}: {left} s left"));
+                    let part = started.elapsed().as_secs_f64() / self.opts.seconds.max(1) as f64;
+                    self.ui.progress((index as f64 + part.min(1.0)) / steps);
                 }
                 if self.opts.focus && !game.contains(&foreground_pid()) {
                     let since = lost_since.get().unwrap_or_else(Instant::now);
@@ -641,8 +650,18 @@ pub fn run(opts: &Options, ui: &dyn Ui, cancel: &AtomicBool) -> Result<Outcome, 
     ui.say("Keep the game in front and the scene as constant as you can.");
     ui.say("A sound marks the start, every switch and the end.");
 
-    let mut run =
-        Run { opts, ui, cancel, dir: dir.clone(), cfg, topo, presentmon, out_dir, background };
+    let mut run = Run {
+        opts,
+        ui,
+        cancel,
+        dir: dir.clone(),
+        cfg,
+        topo,
+        presentmon,
+        out_dir,
+        background,
+        steps: plan.len(),
+    };
     let mut frames: Vec<(String, Vec<f64>)> =
         profiles.iter().map(|p| (p.clone(), Vec::new())).collect();
     let mut rounds_text = String::new();
@@ -669,7 +688,7 @@ pub fn run(opts: &Options, ui: &dyn Ui, cancel: &AtomicBool) -> Result<Outcome, 
             run.switch(profile)?;
             let mask = run.mask_of(profile)?;
             ui.say(&format!("round {round}: {profile} (cpus {}) ...", format_mask(mask)));
-            let capture = run.capture(*round, profile, &label)?;
+            let capture = run.capture(i, *round, profile, &label)?;
             let times = capture.times;
             if let Some((_, sums)) = gpu.iter_mut().find(|(p, _)| p == profile) {
                 let total: f64 = times.iter().sum();
