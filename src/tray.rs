@@ -4,7 +4,8 @@
 
 use std::cell::{Cell, RefCell};
 use std::ptr::{null, null_mut};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HWND, LPARAM, LRESULT, POINT, WPARAM,
@@ -15,24 +16,26 @@ use windows_sys::Win32::UI::Controls::Dialogs::{
     GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OPENFILENAMEW,
 };
 use windows_sys::Win32::UI::Shell::{
-    ShellExecuteW, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
-    NIM_MODIFY, NOTIFYICONDATAW,
+    ShellExecuteW, Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIM_ADD,
+    NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, ChangeWindowMessageFilterEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
     DestroyMenu, DestroyWindow, DispatchMessageW, EnumWindows, FindWindowW, GetCursorPos,
     GetMessageW, GetSystemMetrics, GetWindow, GetWindowTextLengthW, GetWindowThreadProcessId,
-    IsWindowVisible, KillTimer, LoadIconW, LoadImageW, PostMessageW, PostQuitMessage,
+    IsWindowVisible, KillTimer, LoadIconW, LoadImageW, MessageBoxW, PostMessageW, PostQuitMessage,
     RegisterClassW, RegisterWindowMessageW, SetForegroundWindow, SetTimer, TrackPopupMenu,
-    TranslateMessage, GW_OWNER, HMENU, IDI_APPLICATION, IMAGE_ICON, LR_SHARED, MF_CHECKED,
-    MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, MSGFLT_ALLOW, SM_CXSMICON, SM_CYSMICON,
-    SW_SHOWNORMAL, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_DESTROY, WM_LBUTTONUP,
-    WM_NULL, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
+    TranslateMessage, GW_OWNER, HMENU, IDI_APPLICATION, IDYES, IMAGE_ICON, LR_SHARED,
+    MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_YESNO, MF_CHECKED, MF_GRAYED, MF_POPUP,
+    MF_SEPARATOR, MF_STRING, MSG, MSGFLT_ALLOW, SM_CXSMICON, SM_CYSMICON, SW_SHOWNORMAL,
+    TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_DESTROY, WM_LBUTTONUP, WM_NULL,
+    WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
 };
 
 use windows_sys::Win32::UI::WindowsAndMessaging::GetShellWindow;
 
 use crate::autostart::{self, Kind};
+use crate::bench;
 use crate::config::{self, Mode};
 use crate::sys::{process_info, RealSystem};
 type Engine = crate::engine::Engine<RealSystem>;
@@ -72,6 +75,11 @@ enum Action {
     /// Compare profiles for a running program with PresentMon.
     Benchmark {
         pattern: String,
+        profiles: Vec<String>,
+    },
+    StopBenchmark,
+    OpenReport {
+        path: String,
     },
     AddProgram,
     TogglePause,
@@ -214,8 +222,14 @@ fn windowed_processes() -> Vec<String> {
 }
 fn build_menu(e: &Engine) -> (HMENU, Menu) {
     let mut m = Menu { actions: Vec::new() };
+    let running = bench_running();
     unsafe {
         let root = CreatePopupMenu();
+        if running {
+            let status = BENCH_STATUS.lock().ok().and_then(|s| s.clone()).unwrap_or_default();
+            m.item(root, &format!("Stop benchmark  ({status})"), false, Action::StopBenchmark);
+            m.sep(root);
+        }
 
         // Assign > running windowed processes > profiles
         let assign = CreatePopupMenu();
@@ -269,11 +283,19 @@ fn build_menu(e: &Engine) -> (HMENU, Menu) {
             m.item(sub, "Enforce", r.enforce, Action::ToggleEnforce { pattern: r.pattern.clone() });
             m.item(sub, "Remove rule", false, Action::Remove { pattern: r.pattern.clone() });
             m.sep(sub);
-            if count > 0 {
-                let action = Action::Benchmark { pattern: r.pattern.clone() };
-                m.item(sub, "Benchmark profiles...", false, action);
+            if running {
+                m.item(sub, "Benchmark (one is running)", false, Action::Nothing);
+            } else if count > 0 {
+                let bench = CreatePopupMenu();
+                let names: Vec<String> = e.cfg.profiles.iter().map(|p| p.name.clone()).collect();
+                for choice in benchmark_choices(&names, &r.profile) {
+                    let label = choice_label(&choice, names.len());
+                    let action = Action::Benchmark { pattern: r.pattern.clone(), profiles: choice };
+                    m.item(bench, &label, false, action);
+                }
+                m.sub(sub, "Benchmark", bench);
             } else {
-                m.item(sub, "Benchmark profiles (start the program first)", false, Action::Nothing);
+                m.item(sub, "Benchmark (start the program first)", false, Action::Nothing);
             }
             let status = if count == 0 {
                 "not running".to_string()
@@ -288,6 +310,10 @@ fn build_menu(e: &Engine) -> (HMENU, Menu) {
         m.item(root, "Pause", e.paused, Action::TogglePause);
         m.item(root, "Open config", false, Action::OpenConfig);
         m.item(root, "Open log", false, Action::OpenLog);
+        if let Some(report) = last_report() {
+            let path = report.to_string_lossy().into_owned();
+            m.item(root, "Open last benchmark report", false, Action::OpenReport { path });
+        }
         m.item(
             root,
             "Start with Windows",
@@ -350,7 +376,11 @@ unsafe fn handle(hwnd: HWND, action: Action) {
                 e.save_and_apply();
             }
         }),
-        Action::Benchmark { pattern } => start_benchmark(&pattern),
+        Action::Benchmark { pattern, profiles } => {
+            start_benchmark(hwnd, file_name(&pattern).to_string(), profiles)
+        }
+        Action::StopBenchmark => stop_benchmark(),
+        Action::OpenReport { path } => open(&path),
         Action::AddProgram => add_program(hwnd),
         Action::TogglePause => {
             with_engine(|e| e.set_paused(!e.paused));
@@ -396,17 +426,245 @@ unsafe fn add_program(hwnd: HWND) {
     }
 }
 
-/// Runs `Pinfold.exe benchmark` in its own console window. Started from
-/// here it inherits this instance's elevation, which PresentMon needs.
-fn start_benchmark(pattern: &str) {
-    let Ok(exe) = std::env::current_exe() else {
+// --- Benchmark without a window ----------------------------------------------
+//
+// The benchmark runs on its own thread in this process: it has this
+// instance's elevation (PresentMon needs it), and the engine on the main
+// thread applies each profile switch. Progress goes to the tooltip and the
+// log, signals are sounds, the result is a notification and a dialog.
+
+/// Set while a benchmark runs; storing true stops it.
+static BENCH_CANCEL: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
+/// Progress for the tooltip.
+static BENCH_STATUS: Mutex<Option<String>> = Mutex::new(None);
+/// A notification for the main thread to show (title, text).
+static BENCH_NOTE: Mutex<Option<(String, String)>> = Mutex::new(None);
+const WM_BENCH_STATUS: u32 = WM_APP + 2;
+const WM_BENCH_NOTE: u32 = WM_APP + 3;
+
+fn bench_running() -> bool {
+    BENCH_CANCEL.lock().map(|c| c.is_some()).unwrap_or(false)
+}
+
+/// Comparisons offered for a rule: Cache against Frequency, the rule's
+/// profile against each other one, and all profiles together.
+fn benchmark_choices(profiles: &[String], current: &str) -> Vec<Vec<String>> {
+    let find = |name: &str| profiles.iter().find(|p| p.eq_ignore_ascii_case(name)).cloned();
+    let mut out: Vec<Vec<String>> = Vec::new();
+    let mut add = |choice: Vec<String>| {
+        let key = |c: &[String]| {
+            let mut k: Vec<String> = c.iter().map(|p| p.to_lowercase()).collect();
+            k.sort();
+            k
+        };
+        if choice.len() >= 2 && !out.iter().any(|c| key(c) == key(&choice)) {
+            out.push(choice);
+        }
+    };
+    if let (Some(c), Some(f)) = (find("Cache"), find("Frequency")) {
+        add(vec![c, f]);
+    }
+    if let Some(cur) = find(current) {
+        for p in profiles.iter().filter(|p| !p.eq_ignore_ascii_case(&cur)) {
+            add(vec![cur.clone(), p.clone()]);
+        }
+    }
+    if profiles.len() > 2 {
+        add(profiles.to_vec());
+    }
+    out
+}
+
+fn choice_label(choice: &[String], all: usize) -> String {
+    if choice.len() > 2 && choice.len() == all {
+        format!("All {all} profiles")
+    } else {
+        choice.join(" vs ")
+    }
+}
+
+/// The report of the most recent benchmark.
+fn last_report() -> Option<std::path::PathBuf> {
+    let dir = config::dir().join("benchmarks");
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path().join("report.txt"))
+        .filter_map(|p| std::fs::metadata(&p).ok()?.modified().ok().map(|t| (t, p)))
+        .max_by_key(|(t, _)| *t)
+        .map(|(_, p)| p)
+}
+
+struct TrayUi {
+    hwnd: usize,
+}
+
+impl bench::Ui for TrayUi {
+    fn say(&self, line: &str) {
+        crate::log::log(&format!("benchmark: {line}"));
+    }
+    fn status(&self, text: &str) {
+        if let Ok(mut s) = BENCH_STATUS.lock() {
+            *s = Some(text.to_string());
+        }
+        unsafe { PostMessageW(self.hwnd as HWND, WM_BENCH_STATUS, 0, 0) };
+    }
+    fn sound(&self, sound: bench::Sound) {
+        bench::play(sound);
+    }
+}
+
+fn notify(hwnd: usize, title: &str, text: &str) {
+    if let Ok(mut n) = BENCH_NOTE.lock() {
+        *n = Some((title.to_string(), text.to_string()));
+    }
+    unsafe { PostMessageW(hwnd as HWND, WM_BENCH_NOTE, 0, 0) };
+}
+
+fn ask(text: &str) -> bool {
+    unsafe {
+        MessageBoxW(
+            null_mut(),
+            wide(text).as_ptr(),
+            wide("Pinfold benchmark").as_ptr(),
+            MB_YESNO | MB_ICONQUESTION,
+        ) == IDYES
+    }
+}
+
+fn tell(text: &str) {
+    unsafe {
+        MessageBoxW(
+            null_mut(),
+            wide(text).as_ptr(),
+            wide("Pinfold benchmark").as_ptr(),
+            MB_OK | MB_ICONINFORMATION,
+        );
+    }
+}
+
+fn start_benchmark(hwnd: HWND, target: String, profiles: Vec<String>) {
+    let paused = ENGINE.with(|e| e.borrow().as_ref().map(|e| e.paused)).unwrap_or(false);
+    if paused {
+        message_box("Pinfold is paused, so it cannot switch profiles. Resume it first.");
+        return;
+    }
+    let cancel = Arc::new(AtomicBool::new(false));
+    match BENCH_CANCEL.lock() {
+        Ok(mut c) if c.is_none() => *c = Some(cancel.clone()),
+        _ => return,
+    }
+    let hwnd = hwnd as usize;
+    let args = [target.clone(), "--profiles".to_string(), profiles.join(",")];
+    std::thread::spawn(move || {
+        let ui = TrayUi { hwnd };
+        let result = bench::parse_args(&args)
+            .map_err(bench::Failure::from)
+            .and_then(|opts| bench::run(&opts, &ui, &cancel));
+        if let Ok(mut c) = BENCH_CANCEL.lock() {
+            *c = None;
+        }
+        if let Ok(mut s) = BENCH_STATUS.lock() {
+            *s = None;
+        }
+        unsafe { PostMessageW(hwnd as HWND, WM_BENCH_STATUS, 0, 0) };
+        finish_benchmark(hwnd, &target, result);
+    });
+}
+
+/// Tell the result. Runs on the benchmark thread: the dialogs do not block
+/// the tray.
+fn finish_benchmark(hwnd: usize, target: &str, result: Result<bench::Outcome, bench::Failure>) {
+    match result {
+        Ok(outcome) => {
+            crate::log::log(&format!("benchmark: {}", outcome.verdict.text));
+            let title = match &outcome.verdict.winner {
+                Some(w) => format!("Benchmark of {target}: {w} wins"),
+                None => format!("Benchmark of {target}: no clear winner"),
+            };
+            notify(hwnd, &title, &outcome.verdict.text);
+            let mut text = format!("{}\n\n{}", outcome.verdict.text, outcome.summary);
+            if let Some(note) = &outcome.gpu_note {
+                text.push_str(&format!("\n{note}"));
+            }
+            text.push_str(&format!(
+                "\n\nThe full report: \"Open last benchmark report\" in the Pinfold menu,\n{}",
+                outcome.report_path.display()
+            ));
+            match outcome.better_profile() {
+                Some(w) => {
+                    text.push_str(&format!("\n\nMake {w} the rule for {target}?"));
+                    if ask(&text) {
+                        if let Err(e) = bench::apply(target, w) {
+                            tell(&format!("Could not change the rule: {e}"));
+                        }
+                    }
+                }
+                None => {
+                    if let Some(w) = &outcome.verdict.winner {
+                        text.push_str(&format!("\n\n{target} already uses {w}."));
+                    }
+                    tell(&text);
+                }
+            }
+        }
+        Err(bench::Failure::Cancelled) => {
+            crate::log::log("benchmark: stopped");
+            notify(hwnd, "Benchmark stopped", "The rule is as it was before.");
+        }
+        Err(bench::Failure::NeedsElevation) => {
+            let text = "PresentMon needs administrator rights, and this Pinfold runs without \
+                        them.\n\nRestart Pinfold with administrator rights? Then start the \
+                        benchmark again from the menu.";
+            if ask(text) {
+                let started = std::env::current_exe()
+                    .map_err(|e| e.to_string())
+                    .and_then(|exe| crate::win::launch_elevated(&exe, &[]));
+                match started {
+                    // The new instance waits for this one to exit.
+                    Ok(()) => unsafe {
+                        PostMessageW(hwnd as HWND, quit_message(), 0, 0);
+                    },
+                    Err(e) => tell(&e),
+                }
+            }
+        }
+        Err(bench::Failure::Message(e)) => {
+            crate::log::log(&format!("benchmark failed: {e}"));
+            notify(hwnd, "Benchmark stopped", "The rule is as it was before.");
+            tell(&format!("Benchmark stopped: {e}\n\nThe rule is as it was before."));
+        }
+    }
+}
+
+fn stop_benchmark() {
+    if let Ok(c) = BENCH_CANCEL.lock() {
+        if let Some(cancel) = c.as_ref() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Copy text into a fixed-size UTF-16 field, cut to fit with its NUL.
+fn fill(field: &mut [u16], text: &str) {
+    let mut w: Vec<u16> = text.encode_utf16().take(field.len() - 1).collect();
+    w.push(0);
+    field[..w.len()].copy_from_slice(&w);
+}
+
+unsafe fn show_note(hwnd: HWND) {
+    let Some((title, text)) = BENCH_NOTE.lock().ok().and_then(|mut n| n.take()) else {
         return;
     };
-    let started =
-        std::process::Command::new(exe).args(["benchmark", file_name(pattern), "--window"]).spawn();
-    if let Err(e) = started {
-        message_box(&format!("Cannot start the benchmark: {e}"));
-    }
+    let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
+    nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+    nid.hWnd = hwnd;
+    nid.uID = 1;
+    nid.uFlags = NIF_INFO;
+    nid.dwInfoFlags = NIIF_INFO;
+    fill(&mut nid.szInfoTitle, &title);
+    fill(&mut nid.szInfo, &text);
+    Shell_NotifyIconW(NIM_MODIFY, &nid);
 }
 
 fn open(path: &str) {
@@ -538,8 +796,13 @@ unsafe fn update_icon(hwnd: HWND, message: u32) {
     if nid.hIcon.is_null() {
         nid.hIcon = LoadIconW(null_mut(), IDI_APPLICATION);
     }
-    let tip = wide(if paused == Some(true) { "Pinfold (paused)" } else { "Pinfold" });
-    nid.szTip[..tip.len()].copy_from_slice(&tip);
+    let status = BENCH_STATUS.lock().ok().and_then(|s| s.clone());
+    let tip = match status {
+        Some(s) => format!("Pinfold benchmark: {s}"),
+        None if paused == Some(true) => "Pinfold (paused)".to_string(),
+        None => "Pinfold".to_string(),
+    };
+    fill(&mut nid.szTip, &tip);
     Shell_NotifyIconW(message, &nid);
 }
 
@@ -561,6 +824,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             poll(hwnd);
             0
         }
+        WM_BENCH_STATUS => {
+            update_icon(hwnd, NIM_MODIFY);
+            0
+        }
+        WM_BENCH_NOTE => {
+            show_note(hwnd);
+            0
+        }
         WM_TRAY => {
             let event = lparam as u32;
             if event == WM_RBUTTONUP || event == WM_LBUTTONUP {
@@ -570,6 +841,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_DESTROY => {
             KillTimer(hwnd, TIMER_ID);
+            // Put the rule back before the process ends.
+            stop_benchmark();
+            for _ in 0..30 {
+                if !bench_running() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
             let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
             nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
             nid.hWnd = hwnd;
@@ -696,6 +975,49 @@ mod tests {
         let procs = z(&[("C:\\a.exe", 1), ("c:\\A.EXE", 5), ("C:\\b.exe", 3), ("C:\\c.exe", 2)]);
         assert_eq!(assign_order(procs.clone(), None, 30), ["C:\\a.exe", "C:\\b.exe", "C:\\c.exe"]);
         assert_eq!(assign_order(procs, None, 2).len(), 2);
+    }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn benchmark_choices_for_the_default_profiles() {
+        let profiles = names(&["Cache", "Frequency", "All cores"]);
+        let choices = super::benchmark_choices(&profiles, "cache");
+        let labels: Vec<String> = choices.iter().map(|c| super::choice_label(c, 3)).collect();
+        assert_eq!(labels, ["Cache vs Frequency", "Cache vs All cores", "All 3 profiles"]);
+
+        // A rule on another profile is compared against the rest.
+        let choices = super::benchmark_choices(&profiles, "All cores");
+        let labels: Vec<String> = choices.iter().map(|c| super::choice_label(c, 3)).collect();
+        assert_eq!(
+            labels,
+            [
+                "Cache vs Frequency",
+                "All cores vs Cache",
+                "All cores vs Frequency",
+                "All 3 profiles"
+            ]
+        );
+    }
+
+    #[test]
+    fn benchmark_choices_for_own_profiles() {
+        let choices = super::benchmark_choices(&names(&["Fast", "Slow"]), "Slow");
+        assert_eq!(choices, [names(&["Slow", "Fast"])]);
+        assert!(super::benchmark_choices(&names(&["Only"]), "Only").is_empty());
+        // A rule whose profile is gone still offers all profiles.
+        let choices = super::benchmark_choices(&names(&["A", "B", "C"]), "Gone");
+        assert_eq!(choices, [names(&["A", "B", "C"])]);
+    }
+
+    #[test]
+    fn long_text_is_cut_to_fit_the_field() {
+        let mut field = [1u16; 8];
+        super::fill(&mut field, "Pinfold benchmark");
+        assert_eq!(super::from_wide(&field), "Pinfold");
+        assert_eq!(field[7], 0);
     }
 
     #[test]

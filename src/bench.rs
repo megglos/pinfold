@@ -737,7 +737,17 @@ pub fn run(opts: &Options, ui: &dyn Ui, cancel: &AtomicBool) -> Result<Outcome, 
     let report_path = run.out_dir.join("report.txt");
     let _ = std::fs::write(&report_path, &text);
     text.push_str(&format!("\nCaptures and this report: {}\n", run.out_dir.display()));
-    Ok(Outcome { report: text, verdict, gpu_note, current, report_path })
+    let summary = columns
+        .iter()
+        .map(|(p, s)| {
+            format!(
+                "{p}: {:.1} avg FPS, {:.1} 1% low, {:.1} ms p99",
+                s.avg_fps, s.low1_fps, s.p99_ms
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(Outcome { report: text, verdict, summary, gpu_note, current, report_path })
 }
 
 /// A finished benchmark.
@@ -745,12 +755,12 @@ pub struct Outcome {
     /// The full report, as printed and saved.
     pub report: String,
     pub verdict: frametime::Verdict,
+    /// One line per profile with the main numbers.
+    pub summary: String,
     /// How busy the GPU was, and whether that hid the CPU placement.
-    #[allow(dead_code)] // read by the tray (next commit)
     pub gpu_note: Option<String>,
     /// The profile the rule had before the benchmark, if there was a rule.
     pub current: Option<String>,
-    #[allow(dead_code)] // read by the tray (next commit)
     pub report_path: PathBuf,
 }
 
