@@ -33,16 +33,21 @@ fn fake_presentmon(s: &Sandbox, body: &str) -> PathBuf {
     cmd
 }
 
+/// Captures every program, like the real PresentMon without a process
+/// filter: the desktop compositor plus every test target that is running
+/// (from all tests). The benchmark has to pick its own target out.
 const CAPTURING: &str = r#"
-$name = $args[[array]::IndexOf($args, '--process_name') + 1]
-$out  = $args[[array]::IndexOf($args, '--output_file') + 1]
+$out = $args[[array]::IndexOf($args, '--output_file') + 1]
 if ($args -notcontains '--timed' -or $args -notcontains '--terminate_after_timed') { exit 3 }
-$p = Get-Process -Name ($name -replace '\.exe$', '') | Select-Object -First 1
-$ms = if ([int64]$p.ProcessorAffinity -eq 1) { '10.0' } else { '20.0' }
-$rows = @('Application,ProcessID,MsBetweenPresents') + (1..200 | ForEach-Object { "$name,$($p.Id),$ms" })
+if ($args -contains '--process_name') { exit 4 }
+$rows = @('Application,ProcessID,MsBetweenPresents')
+$rows += 1..500 | ForEach-Object { "dwm.exe,1,16.6" }
+foreach ($p in Get-Process -Name 'pf-target-*' -ErrorAction SilentlyContinue) {
+    $ms = if ([int64]$p.ProcessorAffinity -eq 1) { '10.0' } else { '20.0' }
+    $rows += 1..200 | ForEach-Object { "$($p.Name).exe,$($p.Id),$ms" }
+}
 [IO.File]::WriteAllLines($out, $rows)
 "#;
-
 fn rule_count(s: &Sandbox) -> usize {
     let cfg: serde_json::Value = serde_json::from_str(&s.config()).unwrap();
     cfg["rules"].as_array().unwrap().len()
@@ -203,4 +208,33 @@ fn presentmon_failure_is_reported_with_its_own_words_before_anything_is_changed(
     let cfg: serde_json::Value = serde_json::from_str(&s.config()).unwrap();
     assert_eq!(cfg["rules"][0]["profile"], "Wide");
     assert_eq!(cfg["rules"][0]["enforce"], false);
+}
+
+#[test]
+fn a_game_that_presents_nothing_is_reported_with_who_did() {
+    let s = Sandbox::new();
+    write_config(&s, "");
+    let pm = fake_presentmon(&s, CAPTURING);
+    // Running, but not one of the programs the stand-in sees presenting.
+    let target = s.target();
+    let quiet = s.dir.join("target").join("quiet-game.exe");
+    std::fs::copy(&target.path, &quiet).unwrap();
+    let mut child = std::process::Command::new(&quiet)
+        .arg("run")
+        .env("PINFOLD_DIR", s.dir.join("quiet-cfg"))
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let mut args = vec!["benchmark", "quiet-game.exe", "--presentmon", pm.to_str().unwrap()];
+    args.extend_from_slice(FAST);
+    let out = s.run(&args);
+    let _ = child.kill();
+    let _ = child.wait();
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert_eq!(out.status.code(), Some(1), "{text}");
+    assert!(text.contains("quiet-game.exe presented no frames"), "{text}");
+    assert!(text.contains("dwm.exe (500 frames)"), "{text}");
+    assert_eq!(rule_count(&s), 0, "rule removed again");
 }

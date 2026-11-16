@@ -258,11 +258,10 @@ impl Run<'_> {
             profile.chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).collect();
         let csv = self.out_dir.join(format!("round{round}-{safe}.csv"));
         let _ = std::fs::remove_file(&csv);
-        presentmon_capture(&self.presentmon, &self.opts.target, &csv, self.opts.seconds)
-            .map_err(|e| e.message())?;
+        presentmon_capture(&self.presentmon, &csv, self.opts.seconds).map_err(|e| e.message())?;
         let text = std::fs::read_to_string(&csv)
             .map_err(|_| format!("PresentMon wrote no capture file ({})", csv.display()))?;
-        frametime::parse_csv(&text).map_err(|e| {
+        frametime::parse_csv(&text, &self.opts.target).map_err(|e| {
             format!("{e} ({}). Was {} in front and rendering?", csv.display(), self.opts.target)
         })
     }
@@ -291,19 +290,15 @@ impl CaptureError {
     }
 }
 
-/// One timed PresentMon capture of all processes named `target` into `csv`.
-fn presentmon_capture(
-    presentmon: &Path,
-    target: &str,
-    csv: &Path,
-    seconds: u32,
-) -> Result<(), CaptureError> {
+/// One timed PresentMon capture into `csv`. Every program is captured and
+/// the target is picked out afterwards: that way a capture without the
+/// target still says who was presenting instead of producing no file.
+fn presentmon_capture(presentmon: &Path, csv: &Path, seconds: u32) -> Result<(), CaptureError> {
     let fail = |code: Option<i32>, output: String| CaptureError { code, output };
     // PresentMon reports problems on stderr; keep it for the error message.
     let err_path = csv.with_extension("presentmon.txt");
     let err_file = std::fs::File::create(&err_path).map_err(|e| fail(None, e.to_string()))?;
     let mut child = Command::new(presentmon)
-        .args(["--process_name", target])
         .arg("--output_file")
         .arg(csv)
         .args(["--timed", &seconds.to_string()])
@@ -415,7 +410,7 @@ pub fn run(opts: &Options) -> Result<String, Failure> {
     // One-second trial capture before anyone switches to the game: finds
     // missing rights and other PresentMon problems while they are cheap.
     let trial = out_dir.join("trial.csv");
-    let checked = presentmon_capture(&presentmon, &opts.target, &trial, 1);
+    let checked = presentmon_capture(&presentmon, &trial, 1);
     let _ = std::fs::remove_file(&trial);
     if let Err(e) = checked {
         let _ = std::fs::remove_dir_all(&out_dir);

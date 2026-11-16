@@ -1,13 +1,18 @@
 //! Frame-time captures: reading PresentMon CSV files and turning frame
 //! times into the usual statistics. Pure functions, no OS access.
 
-/// Frame times in milliseconds from a PresentMon CSV.
+/// One process in a capture.
+struct Group {
+    application: String,
+    pid: String,
+    times: Vec<f64>,
+}
+
+/// Frame times per process, in order of first appearance.
 ///
 /// The frame time column is `MsBetweenPresents` (default metrics) or
-/// `FrameTime` (2.x metrics). When the capture holds several processes,
-/// the one with the most frames is taken: games often have helper
-/// processes with the same name that present nothing.
-pub fn parse_csv(text: &str) -> Result<Vec<f64>, String> {
+/// `FrameTime` (2.x metrics).
+fn groups(text: &str) -> Result<Vec<Group>, String> {
     let mut lines = text.lines().filter(|l| !l.trim().is_empty());
     let header = lines.next().ok_or("the capture is empty")?;
     let cols: Vec<String> =
@@ -17,9 +22,9 @@ pub fn parse_csv(text: &str) -> Result<Vec<f64>, String> {
         .position(|c| c == "frametime" || c == "msbetweenpresents")
         .ok_or("the capture has no FrameTime or MsBetweenPresents column")?;
     let pid_col = cols.iter().position(|c| c == "processid");
+    let app_col = cols.iter().position(|c| c == "application" || c == "processname");
 
-    // (pid, frame times), in order of first appearance.
-    let mut groups: Vec<(String, Vec<f64>)> = Vec::new();
+    let mut groups: Vec<Group> = Vec::new();
     for line in lines {
         let fields: Vec<&str> = line.split(',').collect();
         let Some(value) = fields.get(time_col).and_then(|v| v.trim().parse::<f64>().ok()) else {
@@ -28,19 +33,58 @@ pub fn parse_csv(text: &str) -> Result<Vec<f64>, String> {
         if !value.is_finite() || value <= 0.0 {
             continue;
         }
-        let pid = pid_col.and_then(|i| fields.get(i)).map(|p| p.trim()).unwrap_or("");
-        match groups.iter_mut().find(|(p, _)| p == pid) {
-            Some((_, times)) => times.push(value),
-            None => groups.push((pid.to_string(), vec![value])),
+        let field = |col: Option<usize>| col.and_then(|i| fields.get(i)).map_or("", |f| f.trim());
+        let (app, pid) = (field(app_col), field(pid_col));
+        match groups.iter_mut().find(|g| g.pid == pid && g.application.eq_ignore_ascii_case(app)) {
+            Some(g) => g.times.push(value),
+            None => groups.push(Group {
+                application: app.to_string(),
+                pid: pid.to_string(),
+                times: vec![value],
+            }),
         }
     }
-    groups
-        .into_iter()
-        .map(|(_, times)| times)
-        .max_by_key(|times| times.len())
-        .ok_or_else(|| "the capture contains no frames".to_string())
+    Ok(groups)
 }
 
+/// Frame times in milliseconds of `target` (an executable file name) from a
+/// PresentMon CSV of the whole system.
+///
+/// Games often have helper processes with the same name that present
+/// nothing, so of the processes called `target` the one with the most
+/// frames is taken. When `target` presented no frames, the error names the
+/// programs that did: that tells a game that was not in front from a
+/// capture that did not work at all.
+pub fn parse_csv(text: &str, target: &str) -> Result<Vec<f64>, String> {
+    let groups = groups(text)?;
+    if groups.is_empty() {
+        return Err("the capture contains no frames from any program".to_string());
+    }
+    // A capture without a name column holds whatever was asked for.
+    let named = groups.iter().any(|g| !g.application.is_empty());
+    let best = groups
+        .iter()
+        .filter(|g| !named || g.application.eq_ignore_ascii_case(target))
+        .max_by_key(|g| g.times.len());
+    if let Some(g) = best {
+        return Ok(g.times.clone());
+    }
+    // Total frames per program, busiest first.
+    let mut seen: Vec<(String, usize)> = Vec::new();
+    for g in &groups {
+        match seen.iter_mut().find(|(name, _)| name.eq_ignore_ascii_case(&g.application)) {
+            Some((_, n)) => *n += g.times.len(),
+            None => seen.push((g.application.clone(), g.times.len())),
+        }
+    }
+    seen.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    let list: Vec<String> =
+        seen.iter().take(6).map(|(name, n)| format!("{name} ({n} frames)")).collect();
+    Err(format!(
+        "{target} presented no frames during the capture. Programs that did: {}",
+        list.join(", ")
+    ))
+}
 #[derive(Clone, Debug, PartialEq)]
 pub struct Stats {
     pub frames: usize,
@@ -183,14 +227,14 @@ mod tests {
         let csv = "Application,ProcessID,SwapChainAddress,MsBetweenPresents,MsInPresentAPI\n\
                    game.exe,100,0x1,10.5,0.2\n\
                    game.exe,100,0x1,11.5,0.2\n";
-        assert_eq!(parse_csv(csv).unwrap(), [10.5, 11.5]);
+        assert_eq!(parse_csv(csv, "game.exe").unwrap(), [10.5, 11.5]);
     }
 
     #[test]
     fn parses_v2_frame_time_column_and_bom() {
         let csv =
             "\u{feff}Application,ProcessID,FrameTime\r\ngame.exe,1,16.0\r\ngame.exe,1,17.0\r\n";
-        assert_eq!(parse_csv(csv).unwrap(), [16.0, 17.0]);
+        assert_eq!(parse_csv(csv, "game.exe").unwrap(), [16.0, 17.0]);
     }
 
     #[test]
@@ -199,21 +243,49 @@ mod tests {
                    game.exe,7,900\n\
                    game.exe,8,10\ngame.exe,8,10\ngame.exe,8,10\n\
                    dwm.exe,9,16\ndwm.exe,9,16\n";
-        assert_eq!(parse_csv(csv).unwrap(), [10.0, 10.0, 10.0]);
+        assert_eq!(parse_csv(csv, "game.exe").unwrap(), [10.0, 10.0, 10.0]);
+    }
+
+    #[test]
+    fn picks_the_target_out_of_a_capture_of_everything() {
+        let csv = "Application,ProcessID,MsBetweenPresents\n\
+                   dwm.exe,9,16\ndwm.exe,9,16\ndwm.exe,9,16\ndwm.exe,9,16\n\
+                   Game.EXE,8,10\ngame.exe,8,11\n\
+                   game.exe,7,500\n";
+        // Not the busiest program overall, and not the helper process.
+        assert_eq!(parse_csv(csv, "game.exe").unwrap(), [10.0, 11.0]);
+    }
+
+    #[test]
+    fn names_who_presented_when_the_target_did_not() {
+        let csv = "Application,ProcessID,MsBetweenPresents\n\
+                   dwm.exe,9,16\ndwm.exe,9,16\ndwm.exe,9,16\n\
+                   claude.exe,4,33\n";
+        let err = parse_csv(csv, "game.exe").unwrap_err();
+        assert!(err.contains("game.exe presented no frames"), "{err}");
+        assert!(err.contains("dwm.exe (3 frames), claude.exe (1 frames)"), "{err}");
+    }
+
+    #[test]
+    fn capture_without_a_name_column_is_taken_as_is() {
+        let csv = "ProcessID,FrameTime\n1,16.0\n1,17.0\n";
+        assert_eq!(parse_csv(csv, "game.exe").unwrap(), [16.0, 17.0]);
     }
 
     #[test]
     fn skips_unusable_rows() {
         let csv = "Application,ProcessID,MsBetweenPresents\n\
                    game.exe,1,NA\ngame.exe,1,0\ngame.exe,1,-3\ngame.exe,1\ngame.exe,1,12\n\n";
-        assert_eq!(parse_csv(csv).unwrap(), [12.0]);
+        assert_eq!(parse_csv(csv, "game.exe").unwrap(), [12.0]);
     }
 
     #[test]
     fn reports_what_is_wrong_with_a_capture() {
-        assert!(parse_csv("").unwrap_err().contains("empty"));
-        assert!(parse_csv("a,b\n1,2\n").unwrap_err().contains("MsBetweenPresents"));
-        assert!(parse_csv("Application,MsBetweenPresents\n").unwrap_err().contains("no frames"));
+        assert!(parse_csv("", "game.exe").unwrap_err().contains("empty"));
+        assert!(parse_csv("a,b\n1,2\n", "game.exe").unwrap_err().contains("MsBetweenPresents"));
+        assert!(parse_csv("Application,MsBetweenPresents\n", "game.exe")
+            .unwrap_err()
+            .contains("no frames"));
     }
 
     #[test]
