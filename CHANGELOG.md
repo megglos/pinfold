@@ -3,6 +3,30 @@
 The release pipeline copies the section of a version into its release notes.
 Write the section before you push the tag.
 
+## 1.0.0-beta3 - 2026-11-16
+
+Maintenance release. No new functions and no changes to the config.
+
+- **Message boxes come to the front.** The benchmark messages (errors,
+  "Restart elevated?") now come to the front, also when another window has
+  the focus.
+- **Internal changes.** The tray code is in smaller modules. Dialogs,
+  rule changes and the benchmark report use shared helpers. There are new
+  unit tests for the benchmark report.
+
+### Install
+
+Update from an earlier version:
+
+1. Download `Pinfold-1.0.0-beta3-x64.zip`.
+2. In the tray menu, select "Exit".
+3. Replace `Pinfold.exe` with the new file.
+4. Start `Pinfold.exe`.
+
+For a new install, see the [README](https://github.com/megglos/pinfold#install).
+For the benchmark, you need
+[PresentMon](https://github.com/GameTechDev/PresentMon/releases).
+
 ## 1.0.0-beta2 - 2026-11-16
 
 - **Own benchmark sounds.** Four short tones replace the Windows sounds:
