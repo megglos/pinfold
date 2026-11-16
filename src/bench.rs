@@ -510,6 +510,7 @@ fn presentmon_capture(
 }
 
 /// Why the benchmark did not make a report.
+#[derive(Debug)]
 pub enum Failure {
     /// PresentMon needs rights that this process does not have. Run the
     /// benchmark elevated.
@@ -632,14 +633,7 @@ pub fn run(opts: &Options, ui: &dyn Ui, cancel: &AtomicBool) -> Result<Outcome, 
         background,
         steps: plan.len(),
     };
-    let mut frames: Vec<(String, Vec<f64>)> =
-        profiles.iter().map(|p| (p.clone(), Vec::new())).collect();
-    let mut rounds_text = String::new();
-    let mut per_round: Vec<(u32, String, f64)> = Vec::new();
-    // GPU busy time and total frame time for each profile. None if a
-    // capture has no GPU column.
-    let mut gpu: Vec<(String, Option<(f64, f64)>)> =
-        profiles.iter().map(|p| (p.clone(), Some((0.0, 0.0)))).collect();
+    let mut tally = Tally::new(&profiles);
     let mut outcome = Ok(());
     let started = (|| {
         run.wait_for_focus()?;
@@ -659,26 +653,8 @@ pub fn run(opts: &Options, ui: &dyn Ui, cancel: &AtomicBool) -> Result<Outcome, 
             let mask = run.mask_of(profile)?;
             ui.say(&format!("round {round}: {profile} (cpus {}) ...", format_mask(mask)));
             let capture = run.capture(i, *round, profile, &label)?;
-            let times = capture.times;
-            if let Some((_, sums)) = gpu.iter_mut().find(|(p, _)| p == profile) {
-                let total: f64 = times.iter().sum();
-                *sums = match (*sums, capture.gpu_share) {
-                    (Some((b, t)), Some(share)) => Some((b + share * total, t + total)),
-                    _ => None,
-                };
-            }
-            let s = frametime::stats(&times).ok_or("the capture contains no frames")?;
-            let line = format!(
-                "round {round}: {profile:<12} {:>8.1} avg FPS  {:>8.1} 1% low  {:>7.2} ms p99  ({} frames)",
-                s.avg_fps, s.low1_fps, s.p99_ms, s.frames
-            );
-            ui.say(&line);
-            rounds_text.push_str(&line);
-            rounds_text.push('\n');
-            per_round.push((*round, profile.clone(), s.avg_fps));
-            if let Some((_, all)) = frames.iter_mut().find(|(p, _)| p == profile) {
-                all.extend(times);
-            }
+            let stats = tally.add(*round, profile, capture)?;
+            ui.say(&round_line(*round, profile, &stats));
             Ok::<(), Failure>(())
         })();
         if let Err(e) = step {
@@ -696,37 +672,123 @@ pub fn run(opts: &Options, ui: &dyn Ui, cancel: &AtomicBool) -> Result<Outcome, 
     }
     ui.sound(Sound::Done);
 
-    let columns: Vec<(String, Stats)> = frames
-        .iter()
-        .filter_map(|(p, times)| frametime::stats(times).map(|s| (p.clone(), s)))
-        .collect();
-    let overall: Vec<(String, f64)> = columns.iter().map(|(p, s)| (p.clone(), s.avg_fps)).collect();
-    let verdict = frametime::verdict(&overall, &per_round);
-    let shares: Option<Vec<(String, f64)>> = gpu
-        .iter()
-        .map(|(p, sums)| sums.filter(|(_, t)| *t > 0.0).map(|(b, t)| (p.clone(), b / t)))
-        .collect();
-    let gpu_note = shares.and_then(|s| frametime::gpu_note(&s));
+    let verdict = tally.verdict();
+    let gpu_note = tally.gpu_note();
+    let mut text = report_text(opts, &tally, &verdict, gpu_note.as_deref());
+    let report_path = run.out_dir.join("report.txt");
+    let _ = std::fs::write(&report_path, &text);
+    text.push_str(&format!("\nCaptures and this report: {}\n", run.out_dir.display()));
+    let summary = summary(&tally.columns());
+    Ok(Outcome { report: text, verdict, summary, gpu_note, current, report_path })
+}
+
+/// The results, collected capture by capture.
+struct Tally {
+    /// All frame times of each profile.
+    frames: Vec<(String, Vec<f64>)>,
+    /// (round, profile, statistics) of each capture.
+    captures: Vec<(u32, String, Stats)>,
+    /// GPU busy time and total frame time of each profile, in ms. None if
+    /// a capture has no GPU column.
+    gpu: Vec<(String, Option<(f64, f64)>)>,
+}
+
+impl Tally {
+    fn new(profiles: &[String]) -> Tally {
+        Tally {
+            frames: profiles.iter().map(|p| (p.clone(), Vec::new())).collect(),
+            captures: Vec::new(),
+            gpu: profiles.iter().map(|p| (p.clone(), Some((0.0, 0.0)))).collect(),
+        }
+    }
+
+    /// Add one capture of `profile`. Returns its statistics.
+    fn add(
+        &mut self,
+        round: u32,
+        profile: &str,
+        capture: frametime::Capture,
+    ) -> Result<Stats, Failure> {
+        let stats = frametime::stats(&capture.times).ok_or("the capture contains no frames")?;
+        if let Some((_, sums)) = self.gpu.iter_mut().find(|(p, _)| p == profile) {
+            let total: f64 = capture.times.iter().sum();
+            *sums = match (*sums, capture.gpu_share) {
+                (Some((b, t)), Some(share)) => Some((b + share * total, t + total)),
+                _ => None,
+            };
+        }
+        if let Some((_, all)) = self.frames.iter_mut().find(|(p, _)| p == profile) {
+            all.extend(capture.times);
+        }
+        self.captures.push((round, profile.to_string(), stats.clone()));
+        Ok(stats)
+    }
+
+    /// Statistics of each profile over all its rounds.
+    fn columns(&self) -> Vec<(String, Stats)> {
+        self.frames
+            .iter()
+            .filter_map(|(p, times)| frametime::stats(times).map(|s| (p.clone(), s)))
+            .collect()
+    }
+
+    fn verdict(&self) -> frametime::Verdict {
+        let overall: Vec<(String, f64)> =
+            self.columns().into_iter().map(|(p, s)| (p, s.avg_fps)).collect();
+        let rounds: Vec<(u32, String, f64)> =
+            self.captures.iter().map(|(r, p, s)| (*r, p.clone(), s.avg_fps)).collect();
+        frametime::verdict(&overall, &rounds)
+    }
+
+    fn gpu_note(&self) -> Option<String> {
+        let shares: Option<Vec<(String, f64)>> = self
+            .gpu
+            .iter()
+            .map(|(p, sums)| sums.filter(|(_, t)| *t > 0.0).map(|(b, t)| (p.clone(), b / t)))
+            .collect();
+        shares.and_then(|s| frametime::gpu_note(&s))
+    }
+}
+
+fn round_line(round: u32, profile: &str, s: &Stats) -> String {
+    format!(
+        "round {round}: {profile:<12} {:>8.1} avg FPS  {:>8.1} 1% low  {:>7.2} ms p99  ({} frames)",
+        s.avg_fps, s.low1_fps, s.p99_ms, s.frames
+    )
+}
+
+/// The report as saved in report.txt.
+fn report_text(
+    opts: &Options,
+    tally: &Tally,
+    verdict: &frametime::Verdict,
+    gpu_note: Option<&str>,
+) -> String {
     let mut text = format!(
         "Pinfold benchmark of {}\n{} rounds, {} s per capture, all rounds of a profile combined.\n\n\
          Verdict: {}\n",
         opts.target, opts.rounds, opts.seconds, verdict.text
     );
-    if let Some(note) = &gpu_note {
+    if let Some(note) = gpu_note {
         text.push_str(note);
         text.push('\n');
     }
     text.push('\n');
-    text.push_str(&frametime::report(&columns));
+    text.push_str(&frametime::report(&tally.columns()));
     text.push_str(
         "\nFPS rows: higher is better. Frame time rows: lower is better.\n\
          Differences under about 2-3 % are within run-to-run noise.\n\nPer round:\n",
     );
-    text.push_str(&rounds_text);
-    let report_path = run.out_dir.join("report.txt");
-    let _ = std::fs::write(&report_path, &text);
-    text.push_str(&format!("\nCaptures and this report: {}\n", run.out_dir.display()));
-    let summary = columns
+    for (round, profile, s) in &tally.captures {
+        text.push_str(&round_line(*round, profile, s));
+        text.push('\n');
+    }
+    text
+}
+
+/// One line for each profile with the main numbers.
+fn summary(columns: &[(String, Stats)]) -> String {
+    columns
         .iter()
         .map(|(p, s)| {
             format!(
@@ -735,8 +797,7 @@ pub fn run(opts: &Options, ui: &dyn Ui, cancel: &AtomicBool) -> Result<Outcome, 
             )
         })
         .collect::<Vec<_>>()
-        .join("\n");
-    Ok(Outcome { report: text, verdict, summary, gpu_note, current, report_path })
+        .join("\n")
 }
 
 /// A finished benchmark.
@@ -813,6 +874,71 @@ mod tests {
         assert_eq!((o.seconds, o.rounds, o.settle, o.countdown), (90, 3, 0, 0));
         assert_eq!(o.presentmon.as_deref(), Some("C:\\pm.exe"));
         assert!(o.window);
+    }
+
+    fn capture(ms: f64, frames: usize, gpu: Option<f64>) -> frametime::Capture {
+        frametime::Capture { times: vec![ms; frames], gpu_share: gpu }
+    }
+
+    /// Two rounds, the second in reverse order: Fast at 10 ms, Slow at 20 ms.
+    fn two_rounds(gpu: Option<f64>) -> Tally {
+        let mut t = Tally::new(&["Fast".to_string(), "Slow".to_string()]);
+        t.add(1, "Fast", capture(10.0, 100, gpu)).unwrap();
+        t.add(1, "Slow", capture(20.0, 50, gpu)).unwrap();
+        t.add(2, "Slow", capture(20.0, 50, gpu)).unwrap();
+        t.add(2, "Fast", capture(10.0, 100, gpu)).unwrap();
+        t
+    }
+
+    #[test]
+    fn tally_combines_the_rounds_of_each_profile() {
+        let t = two_rounds(None);
+        let columns = t.columns();
+        assert_eq!(columns.len(), 2);
+        assert_eq!(columns[0].0, "Fast");
+        assert_eq!(columns[0].1.frames, 200);
+        assert!((columns[0].1.avg_fps - 100.0).abs() < 1e-9);
+        assert!((columns[1].1.avg_fps - 50.0).abs() < 1e-9);
+        assert_eq!(t.verdict().winner.as_deref(), Some("Fast"));
+        assert_eq!(
+            summary(&columns),
+            "Fast: 100.0 avg FPS, 100.0 1% low, 10.0 ms p99\nSlow: 50.0 avg FPS, 50.0 1% low, 20.0 ms p99"
+        );
+    }
+
+    #[test]
+    fn report_has_the_verdict_the_table_and_each_round_in_order() {
+        let t = two_rounds(None);
+        let opts = parse_args(&args(&["game.exe"])).unwrap();
+        let text = report_text(&opts, &t, &t.verdict(), None);
+        assert!(text.starts_with("Pinfold benchmark of game.exe\n2 rounds, 60 s per capture"));
+        assert!(text.contains("Verdict: Fast is 100.0% faster than Slow"), "{text}");
+        assert!(text.contains("avg FPS"));
+        let rounds: Vec<&str> = text.lines().filter(|l| l.starts_with("round ")).collect();
+        assert_eq!(rounds.len(), 4);
+        assert!(rounds[0].starts_with("round 1: Fast"));
+        assert!(rounds[2].starts_with("round 2: Slow"));
+        assert!(!text.contains("GPU"));
+    }
+
+    #[test]
+    fn gpu_note_only_when_every_capture_has_the_gpu_column() {
+        let busy = two_rounds(Some(0.95));
+        let note = busy.gpu_note().unwrap();
+        assert!(note.contains("Fast 95%") && note.contains("GPU-bound"), "{note}");
+        let opts = parse_args(&args(&["game.exe"])).unwrap();
+        assert!(report_text(&opts, &busy, &busy.verdict(), Some(&note)).contains("GPU-bound"));
+
+        let mut partial = two_rounds(Some(0.5));
+        partial.add(3, "Fast", capture(10.0, 100, None)).unwrap();
+        assert_eq!(partial.gpu_note(), None);
+    }
+
+    #[test]
+    fn an_empty_capture_is_an_error() {
+        let mut t = Tally::new(&["Fast".to_string()]);
+        assert!(matches!(t.add(1, "Fast", capture(10.0, 0, None)), Err(Failure::Message(_))));
+        assert!(t.captures.is_empty());
     }
 
     #[test]
