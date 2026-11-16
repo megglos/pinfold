@@ -7,6 +7,8 @@ example a game to the V-Cache CCD of a dual-CCD Ryzen X3D.
 A pinfold is a pen where stray animals were kept until claimed; this one
 rounds up stray processes.
 
+![The Pinfold tray menu with the Benchmark submenu open for longshot.exe](docs/images/tray-menu.png)
+
 The full specification is in [docs/SPEC.md](docs/SPEC.md). It still uses the
 working name "CorePin".
 
