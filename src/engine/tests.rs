@@ -13,6 +13,7 @@ const ACCESS_DENIED: u32 = 5;
 
 struct FakeProc {
     pid: u32,
+    start: u64,
     path: String,
     affinity: u64,
     sets: Vec<u32>,
@@ -26,12 +27,15 @@ struct Fake {
     logs: Vec<String>,
     info_calls: usize,
     open_handles: Vec<Handle>,
+    spawned: u64,
 }
 
 impl Fake {
     fn spawn(&mut self, pid: u32, path: &str) {
+        self.spawned += 1;
         self.procs.push(FakeProc {
             pid,
+            start: self.spawned,
             path: path.to_string(),
             affinity: ALL,
             sets: Vec::new(),
@@ -60,7 +64,7 @@ impl System for Fake {
     }
     fn info(&mut self, pid: u32) -> Option<(String, u64)> {
         self.info_calls += 1;
-        self.procs.iter().find(|p| p.pid == pid).map(|p| (p.path.clone(), pid as u64))
+        self.procs.iter().find(|p| p.pid == pid).map(|p| (p.path.clone(), p.start))
     }
     fn open(&mut self, pid: u32) -> Result<Handle, u32> {
         if self.proc(pid).deny_open {
@@ -494,6 +498,51 @@ fn reused_pid_is_matched_as_a_new_process() {
     e.sys.spawn(10, "D:\\game.exe");
     e.tick();
     assert_eq!(e.sys.proc(10).affinity, CACHE);
+}
+
+#[test]
+fn pid_of_a_denied_process_reused_within_one_poll_is_noticed() {
+    // A denied process has no open handle, so nothing stops Windows from
+    // giving its PID to a new process between two polls (F6).
+    let dir = Dir::new();
+    let mut e = engine(&dir, vec![rule("game.exe", "Cache")]);
+    e.sys.spawn(10, "D:\\game.exe");
+    e.sys.proc(10).deny_open = true;
+    e.tick();
+    assert_eq!(e.rule_status(0), (State::Denied, 1));
+
+    e.sys.kill(10);
+    e.sys.spawn(10, "D:\\game.exe"); // same PID, new process, can be opened
+    e.tick();
+    assert_eq!(e.sys.proc(10).affinity, CACHE);
+    assert_eq!(e.rule_status(0), (State::Ok, 1));
+}
+
+#[test]
+fn pid_of_a_denied_process_reused_by_another_program_clears_the_state() {
+    let dir = Dir::new();
+    let mut e = engine(&dir, vec![rule("game.exe", "Cache")]);
+    e.sys.spawn(10, "D:\\game.exe");
+    e.sys.proc(10).deny_open = true;
+    e.tick();
+    e.sys.kill(10);
+    e.sys.spawn(10, "C:\\Windows\\other.exe");
+    e.tick();
+    assert_eq!(e.rule_status(0), (State::Ok, 0), "the rule must not stay 'denied'");
+    assert_eq!(e.sys.proc(10).affinity, ALL);
+}
+
+#[test]
+fn denied_process_that_keeps_running_is_not_reinspected() {
+    let dir = Dir::new();
+    let mut e = engine(&dir, vec![rule("game.exe", "Cache")]);
+    e.sys.spawn(10, "D:\\game.exe");
+    e.sys.proc(10).deny_open = true;
+    for _ in 0..4 {
+        e.tick();
+    }
+    assert_eq!(e.sys.logged("denied"), 1);
+    assert_eq!(e.tracked.len(), 1);
 }
 
 // --- config changes ----------------------------------------------------------

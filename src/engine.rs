@@ -55,10 +55,13 @@ impl State {
     }
 }
 
-/// A running process that matched a rule. The handle stays open for
-/// enforcement, which also keeps the PID from being reused.
+/// A running process that matched a rule, identified by PID plus start
+/// time. The handle stays open for enforcement, which also keeps the PID
+/// from being reused; a denied process has no handle, so its start time is
+/// compared on every poll instead.
 pub struct Tracked {
     pub pid: u32,
+    start: u64,
     handle: Option<Handle>,
     pub path: String,
     pub rule: usize,
@@ -186,12 +189,21 @@ impl<S: System> Engine<S> {
         let mut i = 0;
         while i < self.tracked.len() {
             let t = &self.tracked[i];
-            let gone = self.cur.binary_search(&t.pid).is_err()
-                || t.handle.is_some_and(|h| self.sys.exited(h));
+            let (pid, start) = (t.pid, t.start);
+            let gone = self.cur.binary_search(&pid).is_err()
+                || match t.handle {
+                    Some(h) => self.sys.exited(h),
+                    // No handle pins the PID: it may belong to a new process.
+                    None => self.sys.info(pid).is_some_and(|(_, s)| s != start),
+                };
             if gone {
                 let t = self.tracked.swap_remove(i);
                 if let Some(h) = t.handle {
                     self.sys.close(h);
+                }
+                // A reused PID is still in the list: look at it again.
+                if let Ok(pos) = self.prev.binary_search(&pid) {
+                    self.prev.remove(pos);
                 }
             } else {
                 i += 1;
@@ -217,7 +229,7 @@ impl<S: System> Engine<S> {
     }
 
     fn inspect(&mut self, pid: u32) {
-        let Some((path, _start)) = self.sys.info(pid) else {
+        let Some((path, start)) = self.sys.info(pid) else {
             return;
         };
         let Some(rule) = self.find_rule(&path) else {
@@ -226,6 +238,7 @@ impl<S: System> Engine<S> {
         let name = file_name(&path).to_string();
         let mut t = Tracked {
             pid,
+            start,
             handle: None,
             path,
             rule,
