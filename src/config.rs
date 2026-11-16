@@ -66,6 +66,9 @@ pub struct Config {
     /// (true, default) or the unelevated HKCU Run key (false).
     #[serde(default = "default_true")]
     pub elevated_autostart: bool,
+    /// Path of the PresentMon console application, for `benchmark`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub present_mon: Option<String>,
     #[serde(default)]
     pub profiles: Vec<Profile>,
     #[serde(default)]
@@ -77,6 +80,7 @@ impl Config {
         Config {
             poll_interval_ms: 1000,
             elevated_autostart: true,
+            present_mon: None,
             profiles: topo.default_profiles(),
             rules: Vec::new(),
         }
@@ -206,6 +210,7 @@ mod tests {
         let mut cfg = Config {
             poll_interval_ms: 100,
             elevated_autostart: true,
+            present_mon: None,
             profiles: vec![],
             rules: vec![],
         };

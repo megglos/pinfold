@@ -143,6 +143,7 @@ impl Dir {
         let cfg = Config {
             poll_interval_ms: 1000,
             elevated_autostart: true,
+            present_mon: None,
             profiles: vec![
                 Profile { name: "Cache".into(), cpus: "0-15".into() },
                 Profile { name: "Frequency".into(), cpus: "16-31".into() },
@@ -188,6 +189,7 @@ fn matching_prefers_full_path_then_first_rule() {
     let c = Config {
         poll_interval_ms: 1000,
         elevated_autostart: true,
+        present_mon: None,
         profiles: vec![],
         rules: vec![
             rule("foo.exe", "Cache"),

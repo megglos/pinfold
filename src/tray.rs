@@ -69,6 +69,10 @@ enum Action {
     Remove {
         pattern: String,
     },
+    /// Compare profiles for a running program with PresentMon.
+    Benchmark {
+        pattern: String,
+    },
     AddProgram,
     TogglePause,
     OpenConfig,
@@ -264,6 +268,13 @@ fn build_menu(e: &Engine) -> (HMENU, Menu) {
             m.sep(sub);
             m.item(sub, "Enforce", r.enforce, Action::ToggleEnforce { pattern: r.pattern.clone() });
             m.item(sub, "Remove rule", false, Action::Remove { pattern: r.pattern.clone() });
+            m.sep(sub);
+            if count > 0 {
+                let action = Action::Benchmark { pattern: r.pattern.clone() };
+                m.item(sub, "Benchmark profiles...", false, action);
+            } else {
+                m.item(sub, "Benchmark profiles (start the program first)", false, Action::Nothing);
+            }
             let status = if count == 0 {
                 "not running".to_string()
             } else {
@@ -339,6 +350,7 @@ unsafe fn handle(hwnd: HWND, action: Action) {
                 e.save_and_apply();
             }
         }),
+        Action::Benchmark { pattern } => start_benchmark(&pattern),
         Action::AddProgram => add_program(hwnd),
         Action::TogglePause => {
             with_engine(|e| e.set_paused(!e.paused));
@@ -381,6 +393,19 @@ unsafe fn add_program(hwnd: HWND) {
             e.cfg.upsert_rule(&name, &profile, None);
             e.save_and_apply();
         });
+    }
+}
+
+/// Runs `Pinfold.exe benchmark` in its own console window. Started from
+/// here it inherits this instance's elevation, which PresentMon needs.
+fn start_benchmark(pattern: &str) {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let started =
+        std::process::Command::new(exe).args(["benchmark", file_name(pattern), "--window"]).spawn();
+    if let Err(e) = started {
+        message_box(&format!("Cannot start the benchmark: {e}"));
     }
 }
 

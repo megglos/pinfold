@@ -8,9 +8,11 @@
 #![windows_subsystem = "windows"]
 
 mod autostart;
+mod bench;
 mod config;
 mod diag;
 mod engine;
+mod frametime;
 mod log;
 mod shortcut;
 mod sys;
@@ -33,6 +35,9 @@ Pinfold - persistent per-process CPU affinity
   Pinfold.exe run                  run the engine in this console, no tray
   Pinfold.exe autostart [on|off]   show or change starting with Windows
   Pinfold.exe quit                 stop the background instance
+  Pinfold.exe benchmark <exe> [--profiles A,B] [--seconds 60] [--rounds 2]
+                                   compare frame times of a running game between
+                                   profiles (needs PresentMon and admin rights)
   Pinfold.exe <exe-or-shortcut>    pick a profile for the program (drag and drop)
 
 Rules match by file name unless --full-path is given.
@@ -43,10 +48,14 @@ fn main() {
     let code = match args.first().map(String::as_str) {
         None => tray::run(),
         Some(
-            cmd @ ("run" | "add" | "remove" | "list" | "topology" | "autostart" | "quit" | "help"
-            | "--help" | "-h" | "/?"),
+            cmd @ ("run" | "add" | "remove" | "list" | "topology" | "autostart" | "quit"
+            | "benchmark" | "help" | "--help" | "-h" | "/?"),
         ) => {
-            win::console_init();
+            if args.iter().any(|a| a == "--window") {
+                win::console_window("Pinfold benchmark");
+            } else {
+                win::console_init();
+            }
             match cmd {
                 "run" => cmd_run(),
                 "add" => cmd_add(&args[1..]),
@@ -55,6 +64,7 @@ fn main() {
                 "topology" => cmd_topology(),
                 "autostart" => cmd_autostart(&args[1..]),
                 "quit" => cmd_quit(),
+                "benchmark" => cmd_benchmark(&args[1..]),
                 _ => {
                     say(USAGE);
                     0
@@ -258,6 +268,34 @@ fn cmd_autostart(args: &[String]) -> i32 {
             1
         }
     }
+}
+
+/// Compare frame times of a running program between profiles.
+fn cmd_benchmark(args: &[String]) -> i32 {
+    let opts = match bench::parse_args(args) {
+        Ok(o) => o,
+        Err(e) => {
+            say(&e);
+            say("");
+            say(USAGE);
+            return 2;
+        }
+    };
+    let code = match bench::run(&opts) {
+        Ok(report) => {
+            say("");
+            say(&report);
+            0
+        }
+        Err(e) => {
+            say(&format!("Benchmark stopped: {e}"));
+            1
+        }
+    };
+    if opts.window {
+        win::wait_for_enter();
+    }
+    code
 }
 
 fn cmd_quit() -> i32 {

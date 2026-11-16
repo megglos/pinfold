@@ -11,7 +11,7 @@ use windows_sys::Win32::System::Threading::{
 };
 
 use crate::engine::{Handle, System};
-use crate::win::from_wide;
+use crate::win::{file_name, from_wide};
 
 const PROCESS_SET_INFORMATION: u32 = 0x0200;
 const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
@@ -38,6 +38,33 @@ pub fn process_info(pid: u32) -> Option<(String, u64)> {
         }
         let start = ((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64;
         Some((from_wide(&buf[..len as usize]), start))
+    }
+}
+
+/// PIDs of all running processes with this executable file name.
+pub fn pids_by_name(name: &str) -> Vec<u32> {
+    let mut pids = Vec::new();
+    RealSystem.pids(&mut pids);
+    pids.into_iter()
+        .filter(|&pid| pid != 0)
+        .filter(|&pid| {
+            process_info(pid).is_some_and(|(path, _)| file_name(&path).eq_ignore_ascii_case(name))
+        })
+        .collect()
+}
+
+/// Affinity mask of a process; needs query rights only, so it also works
+/// for an elevated process from an unelevated one.
+pub fn affinity_of(pid: u32) -> Option<u64> {
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return None;
+        }
+        let (mut process, mut system) = (0usize, 0usize);
+        let ok = GetProcessAffinityMask(h, &mut process, &mut system);
+        CloseHandle(h);
+        (ok != 0).then_some(process as u64)
     }
 }
 

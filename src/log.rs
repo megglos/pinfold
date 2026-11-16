@@ -25,6 +25,18 @@ fn timestamp() -> String {
     }
 }
 
+/// Local time as `20261116-153012`, for directory names.
+pub fn timestamp_compact() -> String {
+    unsafe {
+        let mut t = std::mem::zeroed();
+        GetLocalTime(&mut t);
+        format!(
+            "{:04}{:02}{:02}-{:02}{:02}{:02}",
+            t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond
+        )
+    }
+}
+
 pub fn log(msg: &str) {
     let line = format!("{} {}", timestamp(), msg);
     if ECHO.load(Ordering::Relaxed) {
