@@ -5,7 +5,7 @@
 use std::cell::{Cell, RefCell};
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HWND, LPARAM, LRESULT, POINT, WPARAM,
@@ -230,7 +230,7 @@ fn build_menu(e: &Engine) -> (HMENU, Menu) {
     unsafe {
         let root = CreatePopupMenu();
         if running {
-            let status = BENCH_STATUS.lock().ok().and_then(|s| s.clone()).unwrap_or_default();
+            let status = bench_state().status.clone().unwrap_or_default();
             m.item(root, &format!("Stop benchmark  ({status})"), false, Action::StopBenchmark);
             m.sep(root);
         }
@@ -451,19 +451,30 @@ unsafe fn add_program(hwnd: HWND) {
 // log show the progress. Sounds give signals. A notification and a dialog
 // show the result.
 
-/// Set while a benchmark runs. Store true to stop it.
-static BENCH_CANCEL: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
-/// Progress for the tooltip.
-static BENCH_STATUS: Mutex<Option<String>> = Mutex::new(None);
-/// Share of the captures done, in thousandths.
-static BENCH_PROGRESS: AtomicU32 = AtomicU32::new(0);
-/// A notification for the main thread (title, text).
-static BENCH_NOTE: Mutex<Option<(String, String)>> = Mutex::new(None);
+/// The benchmark state that the benchmark thread and the tray share.
+struct BenchState {
+    /// Set while a benchmark runs. Store true to stop it.
+    cancel: Option<Arc<AtomicBool>>,
+    /// Progress text for the tooltip.
+    status: Option<String>,
+    /// Part of the captures that is done, 0 to 1.
+    progress: f64,
+    /// A notification for the main thread (title, text).
+    note: Option<(String, String)>,
+}
+
+static BENCH: Mutex<BenchState> =
+    Mutex::new(BenchState { cancel: None, status: None, progress: 0.0, note: None });
 const WM_BENCH_STATUS: u32 = WM_APP + 2;
 const WM_BENCH_NOTE: u32 = WM_APP + 3;
 
+/// Lock the benchmark state. Keep the lock only for a short time.
+fn bench_state() -> MutexGuard<'static, BenchState> {
+    BENCH.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn bench_running() -> bool {
-    BENCH_CANCEL.lock().map(|c| c.is_some()).unwrap_or(false)
+    bench_state().cancel.is_some()
 }
 
 /// Comparisons for a rule: Cache and Frequency, the profile of the rule and
@@ -524,23 +535,19 @@ impl bench::Ui for TrayUi {
         crate::log::log(&format!("benchmark: {line}"));
     }
     fn status(&self, text: &str) {
-        if let Ok(mut s) = BENCH_STATUS.lock() {
-            *s = Some(text.to_string());
-        }
+        bench_state().status = Some(text.to_string());
         unsafe { PostMessageW(self.hwnd as HWND, WM_BENCH_STATUS, 0, 0) };
     }
     fn sound(&self, sound: bench::Sound) {
         bench::play(sound);
     }
     fn progress(&self, done: f64) {
-        BENCH_PROGRESS.store((done.clamp(0.0, 1.0) * 1000.0) as u32, Ordering::Relaxed);
+        bench_state().progress = done.clamp(0.0, 1.0);
     }
 }
 
 fn notify(hwnd: usize, title: &str, text: &str) {
-    if let Ok(mut n) = BENCH_NOTE.lock() {
-        *n = Some((title.to_string(), text.to_string()));
-    }
+    bench_state().note = Some((title.to_string(), text.to_string()));
     unsafe { PostMessageW(hwnd as HWND, WM_BENCH_NOTE, 0, 0) };
 }
 
@@ -653,10 +660,13 @@ fn start_benchmark(hwnd: HWND, target: String, profiles: Vec<String>) {
         return;
     }
     let cancel = Arc::new(AtomicBool::new(false));
-    BENCH_PROGRESS.store(0, Ordering::Relaxed);
-    match BENCH_CANCEL.lock() {
-        Ok(mut c) if c.is_none() => *c = Some(cancel.clone()),
-        _ => return,
+    {
+        let mut state = bench_state();
+        if state.cancel.is_some() {
+            return;
+        }
+        state.cancel = Some(cancel.clone());
+        state.progress = 0.0;
     }
     let hwnd = hwnd as usize;
     notify(
@@ -671,11 +681,10 @@ fn start_benchmark(hwnd: HWND, target: String, profiles: Vec<String>) {
         let result = bench::parse_args(&args)
             .map_err(bench::Failure::from)
             .and_then(|opts| bench::run(&opts, &ui, &cancel));
-        if let Ok(mut c) = BENCH_CANCEL.lock() {
-            *c = None;
-        }
-        if let Ok(mut s) = BENCH_STATUS.lock() {
-            *s = None;
+        {
+            let mut state = bench_state();
+            state.cancel = None;
+            state.status = None;
         }
         unsafe { PostMessageW(hwnd as HWND, WM_BENCH_STATUS, 0, 0) };
         finish_benchmark(hwnd, &target, result);
@@ -750,10 +759,8 @@ fn finish_benchmark(hwnd: usize, target: &str, result: Result<bench::Outcome, be
 }
 
 fn stop_benchmark() {
-    if let Ok(c) = BENCH_CANCEL.lock() {
-        if let Some(cancel) = c.as_ref() {
-            cancel.store(true, Ordering::Relaxed);
-        }
+    if let Some(cancel) = &bench_state().cancel {
+        cancel.store(true, Ordering::Relaxed);
     }
 }
 
@@ -765,7 +772,7 @@ fn fill(field: &mut [u16], text: &str) {
 }
 
 unsafe fn show_note(hwnd: HWND) {
-    let Some((title, text)) = BENCH_NOTE.lock().ok().and_then(|mut n| n.take()) else {
+    let Some((title, text)) = bench_state().note.take() else {
         return;
     };
     let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
@@ -945,10 +952,13 @@ unsafe fn update_icon(hwnd: HWND, message: u32) {
     nid.uID = 1;
     nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     nid.uCallbackMessage = WM_TRAY;
-    let status = BENCH_STATUS.lock().ok().and_then(|s| s.clone());
+    let (status, progress) = {
+        let state = bench_state();
+        (state.status.clone(), state.progress)
+    };
     // While a benchmark runs: a ring that fills with the progress.
     let ring = match status {
-        Some(_) => progress_icon(BENCH_PROGRESS.load(Ordering::Relaxed) as f64 / 1000.0),
+        Some(_) => progress_icon(progress),
         None => null_mut(),
     };
     if ring.is_null() {
