@@ -98,6 +98,19 @@ impl Config {
         self.rules.iter().position(|r| r.pattern.eq_ignore_ascii_case(pattern))
     }
 
+    pub fn rule(&self, pattern: &str) -> Option<&Rule> {
+        self.rule_index(pattern).map(|i| &self.rules[i])
+    }
+
+    pub fn rule_mut(&mut self, pattern: &str) -> Option<&mut Rule> {
+        self.rule_index(pattern).map(|i| &mut self.rules[i])
+    }
+
+    /// Remove the rule for `pattern`. Returns the removed rule.
+    pub fn remove_rule(&mut self, pattern: &str) -> Option<Rule> {
+        self.rule_index(pattern).map(|i| self.rules.remove(i))
+    }
+
     /// Create or update the rule for `pattern`. Returns true when created.
     pub fn upsert_rule(&mut self, pattern: &str, profile: &str, mode: Option<Mode>) -> bool {
         match self.rule_index(pattern) {
@@ -220,5 +233,25 @@ mod tests {
         assert_eq!(cfg.rules[0].profile, "Frequency");
         assert_eq!(cfg.rules[0].mode, Mode::Both);
         assert_eq!(cfg.poll_ms(), 250);
+    }
+
+    #[test]
+    fn rules_are_found_changed_and_removed_by_pattern_in_any_case() {
+        let mut cfg = Config {
+            poll_interval_ms: 1000,
+            elevated_autostart: true,
+            present_mon: None,
+            profiles: vec![],
+            rules: vec![],
+        };
+        cfg.upsert_rule("a.exe", "Cache", None);
+        cfg.upsert_rule("b.exe", "Cache", None);
+        cfg.rule_mut("B.EXE").unwrap().enforce = false;
+        assert!(!cfg.rule("b.exe").unwrap().enforce);
+        assert!(cfg.rule("a.exe").unwrap().enforce);
+        assert_eq!(cfg.remove_rule("A.exe").unwrap().pattern, "a.exe");
+        assert!(cfg.remove_rule("a.exe").is_none());
+        assert!(cfg.rule("a.exe").is_none());
+        assert_eq!(cfg.rules.len(), 1);
     }
 }

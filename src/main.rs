@@ -193,12 +193,10 @@ fn cmd_remove(args: &[String]) -> i32 {
     let Some(mut cfg) = load_config(false) else {
         return 1;
     };
-    let index = cfg.rule_index(arg).or_else(|| cfg.rule_index(file_name(arg)));
-    let Some(i) = index else {
+    let Some(removed) = cfg.remove_rule(arg).or_else(|| cfg.remove_rule(file_name(arg))) else {
         say(&format!("no rule for '{arg}'"));
         return 1;
     };
-    let removed = cfg.rules.remove(i);
     if let Err(e) = config::save(&config::dir(), &cfg) {
         say(&format!("cannot write config: {e}"));
         return 1;

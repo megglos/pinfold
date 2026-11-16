@@ -307,7 +307,7 @@ impl Run<'_> {
     }
 
     fn mode(&self) -> Mode {
-        self.cfg.rule_index(&self.opts.target).map(|i| self.cfg.rules[i].mode).unwrap_or_default()
+        self.cfg.rule(&self.opts.target).map(|r| r.mode).unwrap_or_default()
     }
 
     /// Set the rule to `profile` and wait until the running program has it.
@@ -545,13 +545,11 @@ impl From<&str> for Failure {
 fn restore(dir: &Path, target: &str, original: Option<Rule>, reset: Option<u64>) {
     // Read again: change only our rule, keep all other changes.
     if let Ok(mut cfg) = config::load(dir) {
-        if let Some(i) = cfg.rule_index(target) {
-            match original {
-                Some(rule) => cfg.rules[i] = rule,
-                None => {
-                    cfg.rules.remove(i);
-                }
-            }
+        let changed = match original {
+            Some(rule) => cfg.rule_mut(target).map(|r| *r = rule).is_some(),
+            None => cfg.remove_rule(target).is_some(),
+        };
+        if changed {
             let _ = config::save(dir, &cfg);
         }
     }
@@ -624,7 +622,7 @@ pub fn run(opts: &Options, ui: &dyn Ui, cancel: &AtomicBool) -> Result<Outcome, 
         });
     }
 
-    let original = cfg.rule_index(&opts.target).map(|i| cfg.rules[i].clone());
+    let original = cfg.rule(&opts.target).cloned();
     let background = crate::tray::is_running();
     let plan = phases(&profiles, opts.rounds);
     let total = opts.countdown + plan.len() as u32 * (opts.settle + opts.seconds);

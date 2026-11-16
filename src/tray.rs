@@ -367,6 +367,16 @@ fn with_engine(f: impl FnOnce(&mut Engine)) {
     });
 }
 
+/// Change one rule from the menu, then save and apply.
+fn edit_rule(pattern: &str, change: impl FnOnce(&mut config::Rule)) {
+    with_engine(|e| {
+        if let Some(rule) = e.cfg.rule_mut(pattern) {
+            change(rule);
+            e.save_and_apply();
+        }
+    });
+}
+
 unsafe fn handle(hwnd: HWND, action: Action) {
     match action {
         Action::Nothing => {}
@@ -374,27 +384,11 @@ unsafe fn handle(hwnd: HWND, action: Action) {
             e.cfg.upsert_rule(file_name(&path), &profile, None);
             e.save_and_apply();
         }),
-        Action::SetProfile { pattern, profile } => with_engine(|e| {
-            if let Some(i) = e.cfg.rule_index(&pattern) {
-                e.cfg.rules[i].profile = profile;
-                e.save_and_apply();
-            }
-        }),
-        Action::SetMode { pattern, mode } => with_engine(|e| {
-            if let Some(i) = e.cfg.rule_index(&pattern) {
-                e.cfg.rules[i].mode = mode;
-                e.save_and_apply();
-            }
-        }),
-        Action::ToggleEnforce { pattern } => with_engine(|e| {
-            if let Some(i) = e.cfg.rule_index(&pattern) {
-                e.cfg.rules[i].enforce = !e.cfg.rules[i].enforce;
-                e.save_and_apply();
-            }
-        }),
+        Action::SetProfile { pattern, profile } => edit_rule(&pattern, |r| r.profile = profile),
+        Action::SetMode { pattern, mode } => edit_rule(&pattern, |r| r.mode = mode),
+        Action::ToggleEnforce { pattern } => edit_rule(&pattern, |r| r.enforce = !r.enforce),
         Action::Remove { pattern } => with_engine(|e| {
-            if let Some(i) = e.cfg.rule_index(&pattern) {
-                e.cfg.rules.remove(i);
+            if e.cfg.remove_rule(&pattern).is_some() {
                 e.save_and_apply();
             }
         }),
