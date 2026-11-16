@@ -25,7 +25,8 @@ use windows_sys::Win32::UI::Shell::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
     DispatchMessageW, EnumWindows, GetCursorPos, GetMessageW, GetWindow, GetWindowTextLengthW,
-    GetWindowThreadProcessId, IsWindowVisible, KillTimer, LoadIconW, PostMessageW,
+    GetSystemMetrics, GetWindowThreadProcessId, IsWindowVisible, KillTimer, LoadIconW,
+    LoadImageW, PostMessageW, IMAGE_ICON, LR_SHARED, SM_CXSMICON, SM_CYSMICON,
     PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SetForegroundWindow, SetTimer,
     TrackPopupMenu, TranslateMessage, GW_OWNER, HMENU, IDI_APPLICATION, MF_CHECKED, MF_GRAYED,
     MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, SW_SHOWNORMAL, TPM_NONOTIFY, TPM_RETURNCMD,
@@ -40,7 +41,7 @@ use crate::win::{file_name, from_wide, message_box, wide};
 const WM_TRAY: u32 = WM_APP + 1;
 const TIMER_ID: usize = 1;
 const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-const RUN_VALUE: &str = "CorePin";
+const RUN_VALUE: &str = "Pinfold";
 
 thread_local! {
     static ENGINE: RefCell<Option<Engine>> = const { RefCell::new(None) };
@@ -139,7 +140,7 @@ pub unsafe fn hidden_window() -> HWND {
     CreateWindowExW(
         0,
         wide("STATIC").as_ptr(),
-        wide("CorePin").as_ptr(),
+        wide("Pinfold").as_ptr(),
         0,
         0,
         0,
@@ -331,7 +332,7 @@ unsafe fn handle(hwnd: HWND, action: Action) {
 unsafe fn add_program(hwnd: HWND) {
     let mut file = [0u16; 1024];
     let filter: Vec<u16> = "Programs (*.exe)\0*.exe\0\0".encode_utf16().collect();
-    let title = wide("Add program to CorePin");
+    let title = wide("Add program to Pinfold");
     let mut ofn: OPENFILENAMEW = std::mem::zeroed();
     ofn.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
     ofn.hwndOwner = hwnd;
@@ -421,8 +422,20 @@ unsafe fn update_icon(hwnd: HWND, message: u32) {
     nid.uID = 1;
     nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     nid.uCallbackMessage = WM_TRAY;
-    nid.hIcon = LoadIconW(null_mut(), IDI_APPLICATION);
-    let tip = wide(if paused == Some(true) { "CorePin (paused)" } else { "CorePin" });
+    // Embedded icons: 1 = normal, 2 = paused (see build.rs).
+    let id: usize = if paused == Some(true) { 2 } else { 1 };
+    nid.hIcon = LoadImageW(
+        GetModuleHandleW(null()),
+        id as *const u16,
+        IMAGE_ICON,
+        GetSystemMetrics(SM_CXSMICON),
+        GetSystemMetrics(SM_CYSMICON),
+        LR_SHARED,
+    );
+    if nid.hIcon.is_null() {
+        nid.hIcon = LoadIconW(null_mut(), IDI_APPLICATION);
+    }
+    let tip = wide(if paused == Some(true) { "Pinfold (paused)" } else { "Pinfold" });
     nid.szTip[..tip.len()].copy_from_slice(&tip);
     Shell_NotifyIconW(message, &nid);
 }
@@ -477,9 +490,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 /// Background instance: tray icon plus engine. Returns the exit code.
 pub fn run() -> i32 {
     unsafe {
-        CreateMutexW(null(), 0, wide("Local\\CorePin.Background").as_ptr());
+        CreateMutexW(null(), 0, wide("Local\\Pinfold.Background").as_ptr());
         if GetLastError() == ERROR_ALREADY_EXISTS {
-            message_box("CorePin is already running. Look for its icon in the notification area.");
+            message_box("Pinfold is already running. Look for its icon in the notification area.");
             return 0;
         }
 
@@ -488,7 +501,7 @@ pub fn run() -> i32 {
         ENGINE.with(|e| *e.borrow_mut() = Some(engine));
 
         let hinstance = GetModuleHandleW(null());
-        let class = wide("CorePinTray");
+        let class = wide("PinfoldTray");
         let mut wc: WNDCLASSW = std::mem::zeroed();
         wc.lpfnWndProc = Some(wndproc);
         wc.hInstance = hinstance;
@@ -499,7 +512,7 @@ pub fn run() -> i32 {
         let hwnd = CreateWindowExW(
             0,
             class.as_ptr(),
-            wide("CorePin").as_ptr(),
+            wide("Pinfold").as_ptr(),
             0,
             0,
             0,

@@ -108,13 +108,13 @@ impl Config {
     }
 }
 
-/// `%AppData%\CorePin`, or `COREPIN_DIR` when set (used for testing).
+/// `%AppData%\Pinfold`, or `PINFOLD_DIR` when set (used for testing).
 pub fn dir() -> PathBuf {
-    if let Some(d) = std::env::var_os("COREPIN_DIR") {
+    if let Some(d) = std::env::var_os("PINFOLD_DIR") {
         return PathBuf::from(d);
     }
     let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-    base.join("CorePin")
+    base.join("Pinfold")
 }
 
 pub fn path() -> PathBuf {
@@ -122,7 +122,7 @@ pub fn path() -> PathBuf {
 }
 
 pub fn log_path() -> PathBuf {
-    dir().join("corepin.log")
+    dir().join("pinfold.log")
 }
 
 pub fn mtime() -> Option<SystemTime> {

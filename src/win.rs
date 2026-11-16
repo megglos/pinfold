@@ -63,7 +63,7 @@ pub fn message_box(text: &str) {
         MessageBoxW(
             std::ptr::null_mut(),
             wide(text).as_ptr(),
-            wide("CorePin").as_ptr(),
+            wide("Pinfold").as_ptr(),
             MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND,
         );
     }

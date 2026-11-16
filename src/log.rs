@@ -1,5 +1,5 @@
 //! Plain text log next to the config. Written only on events.
-//! Size-capped at 1 MB with one rotation (corepin.log -> corepin.log.1).
+//! Size-capped at 1 MB with one rotation (pinfold.log -> pinfold.log.1).
 
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};

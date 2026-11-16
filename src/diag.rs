@@ -95,7 +95,7 @@ pub fn is_elevated() -> bool {
 pub fn snapshot(topo: &Topology) -> Vec<String> {
     let mut lines = vec![
         format!(
-            "CorePin {} started, pid {}, elevated={}",
+            "Pinfold {} started, pid {}, elevated={}",
             env!("CARGO_PKG_VERSION"),
             std::process::id(),
             is_elevated()

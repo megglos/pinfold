@@ -1,4 +1,4 @@
-//! CorePin: persistent per-process CPU affinity for Windows.
+//! Pinfold: persistent per-process CPU affinity for Windows.
 //!
 //! No arguments: background instance with tray icon.
 //! `add`, `remove`, `list`, `topology`: short-lived instances that only
@@ -19,19 +19,19 @@ use config::{Config, Mode};
 use win::{file_name, message_box, say};
 
 const USAGE: &str = "\
-CorePin - persistent per-process CPU affinity
+Pinfold - persistent per-process CPU affinity
 
-  CorePin.exe                      run in the background with a tray icon
-  CorePin.exe add <exe> [--profile <name>] [--mode affinity|cpusets|both] [--full-path]
+  Pinfold.exe                      run in the background with a tray icon
+  Pinfold.exe add <exe> [--profile <name>] [--mode affinity|cpusets|both] [--full-path]
                                    create or update a rule (default profile: Cache)
-  CorePin.exe remove <exe>         remove a rule
-  CorePin.exe list                 show profiles and rules
-  CorePin.exe topology             show CPU topology and environment
-  CorePin.exe run                  run the engine in this console, no tray
-  CorePin.exe <path-to-exe>        pick a profile for the program (drag and drop)
+  Pinfold.exe remove <exe>         remove a rule
+  Pinfold.exe list                 show profiles and rules
+  Pinfold.exe topology             show CPU topology and environment
+  Pinfold.exe run                  run the engine in this console, no tray
+  Pinfold.exe <path-to-exe>        pick a profile for the program (drag and drop)
 
 Rules match by file name unless --full-path is given.
-Config: %AppData%\\CorePin\\config.json";
+Config: %AppData%\\Pinfold\\config.json";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -202,7 +202,7 @@ fn cmd_drop(path: &str) -> i32 {
     if lower.ends_with(".url") {
         message_box(
             "This shortcut does not point at an executable (for example a Steam or Store link), \
-             so CorePin cannot tell which program it starts.\n\n\
+             so Pinfold cannot tell which program it starts.\n\n\
              Start the program once and assign it from the tray menu under Assign.",
         );
         return 1;
