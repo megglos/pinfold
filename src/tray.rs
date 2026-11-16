@@ -30,6 +30,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_NULL, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
 };
 
+use windows_sys::Win32::UI::WindowsAndMessaging::GetShellWindow;
+
 use crate::autostart::{self, Kind};
 use crate::config::{self, Mode};
 use crate::sys::{process_info, RealSystem};
@@ -174,27 +176,38 @@ unsafe extern "system" fn enum_windows_cb(hwnd: HWND, lparam: LPARAM) -> i32 {
     1
 }
 
-/// Processes that own a visible top-level window, most recently started
-/// first, one entry per executable path.
+/// Order of the Assign list. `z_order` holds (path, start time) of the
+/// processes owning visible windows, topmost window first. The program the
+/// user was just using comes first: the topmost one that is not the shell
+/// (clicking the tray icon puts the taskbar in front). The rest follows,
+/// most recently started first, one entry per executable path.
+fn assign_order(z_order: Vec<(String, u64)>, shell: Option<&str>, limit: usize) -> Vec<String> {
+    let is_shell = |path: &str| shell.is_some_and(|s| s.eq_ignore_ascii_case(path));
+    let front = z_order.iter().find(|(path, _)| !is_shell(path)).map(|(path, _)| path.clone());
+    let mut rest = z_order;
+    rest.sort_by_key(|p| std::cmp::Reverse(p.1));
+    let mut out: Vec<String> = Vec::new();
+    for path in front.into_iter().chain(rest.into_iter().map(|(path, _)| path)) {
+        if !out.iter().any(|p| p.eq_ignore_ascii_case(&path)) {
+            out.push(path);
+        }
+    }
+    out.truncate(limit);
+    out
+}
+
+/// Processes that own a visible top-level window, in Assign order.
+/// Computed when the menu opens; nothing tracks the foreground window in
+/// the background (EnumWindows reports windows in Z-order).
 fn windowed_processes() -> Vec<String> {
     let mut pids: Vec<u32> = Vec::new();
     unsafe { EnumWindows(Some(enum_windows_cb), &mut pids as *mut Vec<u32> as LPARAM) };
-    let mut procs: Vec<(String, u64)> = pids.into_iter().filter_map(process_info).collect();
-    procs.sort_by_key(|p| std::cmp::Reverse(p.1));
-    let mut seen: Vec<String> = Vec::new();
-    procs.retain(|(path, _)| {
-        let key = path.to_lowercase();
-        if seen.contains(&key) {
-            false
-        } else {
-            seen.push(key);
-            true
-        }
-    });
-    procs.truncate(30);
-    procs.into_iter().map(|(p, _)| p).collect()
+    let z_order: Vec<(String, u64)> = pids.into_iter().filter_map(process_info).collect();
+    let mut shell_pid = 0u32;
+    unsafe { GetWindowThreadProcessId(GetShellWindow(), &mut shell_pid) };
+    let shell = process_info(shell_pid).map(|(path, _)| path);
+    assign_order(z_order, shell.as_deref(), 30)
 }
-
 fn build_menu(e: &Engine) -> (HMENU, Menu) {
     let mut m = Menu { actions: Vec::new() };
     unsafe {
@@ -609,5 +622,49 @@ pub fn run() -> i32 {
             DispatchMessageW(&msg);
         }
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::assign_order;
+
+    fn z(items: &[(&str, u64)]) -> Vec<(String, u64)> {
+        items.iter().map(|(p, s)| (p.to_string(), *s)).collect()
+    }
+
+    const SHELL: &str = "C:\\Windows\\explorer.exe";
+
+    #[test]
+    fn program_in_front_comes_first_then_most_recently_started() {
+        let procs = z(&[
+            ("D:\\game.exe", 100),
+            ("C:\\old.exe", 50),
+            ("C:\\newest.exe", 300),
+            ("C:\\mid.exe", 200),
+        ]);
+        let order = assign_order(procs, Some(SHELL), 30);
+        assert_eq!(order, ["D:\\game.exe", "C:\\newest.exe", "C:\\mid.exe", "C:\\old.exe"]);
+    }
+
+    #[test]
+    fn shell_on_top_is_skipped_as_foreground() {
+        // After a click on the tray icon the taskbar (explorer) is topmost.
+        let procs = z(&[(SHELL, 10), ("D:\\game.exe", 100), ("C:\\newer.exe", 300)]);
+        let order = assign_order(procs, Some("c:\\windows\\EXPLORER.EXE"), 30);
+        assert_eq!(order, ["D:\\game.exe", "C:\\newer.exe", SHELL]);
+    }
+
+    #[test]
+    fn one_entry_per_executable_and_limit() {
+        let procs = z(&[("C:\\a.exe", 1), ("c:\\A.EXE", 5), ("C:\\b.exe", 3), ("C:\\c.exe", 2)]);
+        assert_eq!(assign_order(procs.clone(), None, 30), ["C:\\a.exe", "C:\\b.exe", "C:\\c.exe"]);
+        assert_eq!(assign_order(procs, None, 2).len(), 2);
+    }
+
+    #[test]
+    fn empty_and_shell_only() {
+        assert!(assign_order(Vec::new(), Some(SHELL), 30).is_empty());
+        assert_eq!(assign_order(z(&[(SHELL, 1)]), Some(SHELL), 30), [SHELL]);
     }
 }
