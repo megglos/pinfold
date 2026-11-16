@@ -14,9 +14,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::config::{self, Config, Mode, Rule};
-use crate::engine::System;
 use crate::frametime::{self, Stats};
-use crate::sys::{affinity_of, pids_by_name, RealSystem};
+use crate::sys::{affinity_of, pids_by_name, pin_by_name};
 use crate::topology::{self, format_mask, Topology};
 use crate::win::file_name;
 
@@ -346,18 +345,8 @@ impl Run<'_> {
     }
 
     fn apply_directly(&self, mask: u64, mode: Mode) {
-        let mut sys = RealSystem;
-        for pid in pids_by_name(&self.opts.target) {
-            if let Ok(h) = sys.open(pid) {
-                if mode != Mode::Cpusets {
-                    let _ = sys.set_affinity(h, mask);
-                }
-                if mode != Mode::Affinity {
-                    let _ = sys.set_cpu_sets(h, &self.topo.cpu_set_ids(mask));
-                }
-                sys.close(h);
-            }
-        }
+        let ids = (mode != Mode::Affinity).then(|| self.topo.cpu_set_ids(mask));
+        pin_by_name(&self.opts.target, (mode != Mode::Cpusets).then_some(mask), ids.as_deref());
     }
 
     /// Capture `profile` (already applied) when the game is in front. If
@@ -555,14 +544,7 @@ fn restore(dir: &Path, target: &str, original: Option<Rule>, reset: Option<u64>)
     }
     // If there was no rule and no engine, nothing else resets the program.
     if let Some(all) = reset {
-        let mut sys = RealSystem;
-        for pid in pids_by_name(target) {
-            if let Ok(h) = sys.open(pid) {
-                let _ = sys.set_affinity(h, all);
-                let _ = sys.set_cpu_sets(h, &[]);
-                sys.close(h);
-            }
-        }
+        pin_by_name(target, Some(all), Some(&[]));
     }
 }
 

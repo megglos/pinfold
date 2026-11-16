@@ -68,6 +68,24 @@ pub fn affinity_of(pid: u32) -> Option<u64> {
     }
 }
 
+/// Set the affinity mask and/or the CPU Sets of all processes with this
+/// executable file name. `None` keeps the value. An empty `cpu_sets`
+/// clears the CPU Sets.
+pub fn pin_by_name(name: &str, mask: Option<u64>, cpu_sets: Option<&[u32]>) {
+    let mut sys = RealSystem;
+    for pid in pids_by_name(name) {
+        if let Ok(h) = sys.open(pid) {
+            if let Some(mask) = mask {
+                let _ = sys.set_affinity(h, mask);
+            }
+            if let Some(ids) = cpu_sets {
+                let _ = sys.set_cpu_sets(h, ids);
+            }
+            sys.close(h);
+        }
+    }
+}
+
 pub struct RealSystem;
 
 impl System for RealSystem {
