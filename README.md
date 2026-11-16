@@ -89,6 +89,8 @@ game was not in front (Alt+Tab) is thrown away and repeated. "Stop benchmark"
 in the tray menu ends it early. The rule is put back the way it was in every
 case.
 
+![The tray icon while a benchmark runs: a ring that fills clockwise, on a dark and a light taskbar](docs/images/progress-ring.png)
+
 The result comes as a notification and a dialog with a verdict:
 
 - **a clear winner** when one profile was fastest in every round and by more
@@ -99,6 +101,8 @@ The result comes as a notification and a dialog with a verdict:
 - **GPU-bound** when the graphics card was busy for 90 % or more of every
   frame in every profile: then the CPU waits for the GPU and its placement
   cannot show. Lower the resolution or render scale and run it again.
+
+![Benchmark result: Cache wins for longshot.exe, 7.6 % faster than Frequency](docs/images/benchmark-result.png)
 
 "Open last benchmark report" in the tray menu shows the full report.
 
