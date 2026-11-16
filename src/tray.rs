@@ -89,6 +89,7 @@ enum Action {
     OpenConfig,
     OpenLog,
     ToggleAutostart,
+    About,
     Exit,
     Nothing,
 }
@@ -341,6 +342,7 @@ fn build_menu(e: &Engine) -> (HMENU, Menu) {
             Action::ToggleAutostart,
         );
         m.sep(root);
+        m.item(root, "About Pinfold", false, Action::About);
         m.item(root, "Exit", false, Action::Exit);
         (root, m)
     }
@@ -409,6 +411,7 @@ unsafe fn handle(hwnd: HWND, action: Action) {
         Action::OpenConfig => open(&config::path(&config::dir()).to_string_lossy()),
         Action::OpenLog => open(&config::log_path(&config::dir()).to_string_lossy()),
         Action::ToggleAutostart => toggle_autostart(hwnd),
+        Action::About => about(),
         Action::Exit => {
             DestroyWindow(hwnd);
         }
@@ -782,6 +785,56 @@ unsafe fn show_note(hwnd: HWND) {
     Shell_NotifyIconW(NIM_MODIFY, &nid);
 }
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
+
+/// Name, version, license and a link to the GitHub page.
+fn about() {
+    use windows_sys::Win32::UI::Controls::{
+        TaskDialogIndirect, TASKDIALOGCONFIG, TDCBF_OK_BUTTON, TDF_ALLOW_DIALOG_CANCELLATION,
+        TDF_ENABLE_HYPERLINKS, TDN_HYPERLINK_CLICKED, TD_INFORMATION_ICON,
+    };
+
+    unsafe extern "system" fn callback(
+        _hwnd: HWND,
+        msg: i32,
+        _wparam: WPARAM,
+        lparam: LPARAM,
+        _data: isize,
+    ) -> i32 {
+        if msg == TDN_HYPERLINK_CLICKED {
+            let mut len = 0;
+            let link = lparam as *const u16;
+            while *link.add(len) != 0 {
+                len += 1;
+            }
+            open(&String::from_utf16_lossy(std::slice::from_raw_parts(link, len)));
+        }
+        0
+    }
+
+    let title = wide("About Pinfold");
+    let heading = wide(&format!("Pinfold {VERSION}"));
+    let text = wide(&format!(
+        "Keeps programs on the CPU cores that you select.\n\nMIT license\n<a href=\"{REPOSITORY}\">{}</a>",
+        REPOSITORY.trim_start_matches("https://")
+    ));
+    unsafe {
+        let mut cfg: TASKDIALOGCONFIG = std::mem::zeroed();
+        cfg.cbSize = std::mem::size_of::<TASKDIALOGCONFIG>() as u32;
+        cfg.dwFlags = TDF_ENABLE_HYPERLINKS | TDF_ALLOW_DIALOG_CANCELLATION;
+        cfg.dwCommonButtons = TDCBF_OK_BUTTON;
+        cfg.pszWindowTitle = title.as_ptr();
+        cfg.Anonymous1.pszMainIcon = TD_INFORMATION_ICON;
+        cfg.pszMainInstruction = heading.as_ptr();
+        cfg.pszContent = text.as_ptr();
+        cfg.pfCallback = Some(callback);
+        if TaskDialogIndirect(&cfg, null_mut(), null_mut(), null_mut()) < 0 {
+            message_box(&format!("Pinfold {VERSION}\n\nMIT license\n{REPOSITORY}"));
+        }
+    }
+}
+
 fn open(path: &str) {
     unsafe {
         ShellExecuteW(
@@ -923,8 +976,8 @@ unsafe fn update_icon(hwnd: HWND, message: u32) {
     }
     let tip = match status {
         Some(s) => format!("Pinfold benchmark: {s}"),
-        None if paused == Some(true) => "Pinfold (paused)".to_string(),
-        None => "Pinfold".to_string(),
+        None if paused == Some(true) => format!("Pinfold {VERSION} (paused)"),
+        None => format!("Pinfold {VERSION}"),
     };
     fill(&mut nid.szTip, &tip);
     Shell_NotifyIconW(message, &nid);

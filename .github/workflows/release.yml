@@ -1,0 +1,72 @@
+name: Release
+
+# Push a tag v<version> (the version in Cargo.toml) to publish a release.
+# A version with a suffix (1.0.0-beta1) becomes a pre-release.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the release notes need all commits and tags
+
+      - name: Version
+        id: version
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+)"').Matches[0].Groups[1].Value
+          if ("v$version" -ne $env:GITHUB_REF_NAME) {
+            throw "Tag $env:GITHUB_REF_NAME does not agree with Cargo.toml version $version"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --check
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test
+      - name: Build
+        run: cargo build --release
+
+      - name: Package
+        run: |
+          $v = '${{ steps.version.outputs.version }}'
+          New-Item -ItemType Directory dist, stage | Out-Null
+          Copy-Item target/release/Pinfold.exe, README.md, LICENSE, CHANGELOG.md stage/
+          Compress-Archive -Path stage/* -DestinationPath "dist/Pinfold-$v-x64.zip"
+          Copy-Item target/release/Pinfold.exe "dist/Pinfold-$v.exe"
+          Get-ChildItem dist | ForEach-Object {
+            "$((Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLower())  $($_.Name)"
+          } | Set-Content -Encoding ascii dist/SHA256SUMS.txt
+
+      - name: Release notes
+        run: |
+          $files = Get-ChildItem dist -Exclude SHA256SUMS.txt | ForEach-Object FullName
+          ./scripts/release-notes.ps1 -Version '${{ steps.version.outputs.version }}' -Files $files -Out notes.md
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $v = '${{ steps.version.outputs.version }}'
+          $flags = @()
+          if ($v -match '-') { $flags += '--prerelease' }
+          gh release create $env:GITHUB_REF_NAME (Get-ChildItem dist).FullName `
+            --title "Pinfold $v" --notes-file notes.md --verify-tag @flags

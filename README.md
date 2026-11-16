@@ -24,6 +24,15 @@ The result is `target\release\Pinfold.exe`. It is one file and needs no runtime.
 
 ## Install
 
+From a release:
+
+1. Download the zip from [Releases](https://github.com/megglos/pinfold/releases).
+2. Extract `Pinfold.exe` to `%LocalAppData%\Programs\Pinfold`.
+3. Start `Pinfold.exe`.
+4. In the tray menu, select "Start with Windows".
+
+From the source:
+
 ```
 powershell -ExecutionPolicy Bypass -File scripts\install.ps1 -Autostart
 ```
@@ -85,7 +94,10 @@ With the tray menu, you can:
 - change or remove rules
 - benchmark profiles for a running game
 - add a program with a file picker
-- pause, open the config or the log, set "Start with Windows".
+- pause, open the config or the log, set "Start with Windows"
+- show the version and the GitHub page (About Pinfold).
+
+The tooltip of the tray icon shows the version.
 
 The config and the log are in `%AppData%\Pinfold` (`config.json`,
 `pinfold.log`). When the config file changes, Pinfold reads it again. At the
@@ -210,6 +222,19 @@ CI runs all tests on each push (`.github/workflows/ci.yml`). It also runs
 The tests do not use `%AppData%\Pinfold`. They do not affect an installed
 Pinfold that runs. There are no automated tests for the tray menu, the
 dialogs and the logon task (it needs a UAC prompt).
+
+## Release
+
+1. Set the version in `Cargo.toml`.
+2. Write the section of the version in `CHANGELOG.md`.
+3. Commit, then push a tag: `git tag v<version>`, `git push origin v<version>`.
+
+The workflow `.github/workflows/release.yml` checks that the tag and the
+version agree, runs all checks and tests, and builds the files. It
+publishes a GitHub release with the zip, the executable and `SHA256SUMS.txt`.
+The release notes are the changelog section, the commits since the last
+tag and the checksums (`scripts\release-notes.ps1`). A version with a suffix
+(`1.0.0-beta1`) becomes a pre-release.
 
 ## Status
 
