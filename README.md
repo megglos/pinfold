@@ -43,7 +43,7 @@ Pinfold.exe topology
 Pinfold.exe run                      engine in a console, no tray
 Pinfold.exe autostart [on|off]       show or change starting with Windows
 Pinfold.exe quit                     stop the background instance
-Pinfold.exe benchmark <exe> [--profiles A,B] [--seconds 60] [--rounds 2]
+Pinfold.exe benchmark <exe> [--profiles A,B] [--seconds 60] [--rounds 2] [--apply]
 ```
 
 Dropping an `.exe` or a `.lnk` shortcut onto `Pinfold.exe` shows a profile picker
@@ -52,8 +52,8 @@ links (Steam, Store) cannot be resolved: start the program once and assign it
 from the tray menu instead.
 
 The tray menu offers: assign a running program to a profile, edit or remove
-rules, add a program by file picker, pause, open config and log, start with
-Windows.
+rules, benchmark profiles for a running game, add a program by file picker,
+pause, open config and log, start with Windows.
 
 Config and log live in `%AppData%\Pinfold` (`config.json`, `pinfold.log`).
 The config is reloaded when it changes on disk. Profiles are created on first
@@ -73,18 +73,37 @@ Set `"elevatedAutostart": false` in the config to use the plain
 
 ## Benchmark: which profile is faster for a game?
 
-Pinfold can measure it. With the game running:
+Pinfold can measure it. With the game running, open the tray menu >
+**Rules** > the game > **Benchmark** and pick a comparison: "Cache vs
+Frequency", the rule's profile against each other profile, or all profiles.
+Then switch to the game.
 
-- tray menu > **Rules** > the game > **Benchmark profiles...**, or
-- `Pinfold.exe benchmark game.exe`
+The benchmark starts when the game is the window in front. It switches the
+game between the profiles, captures the frame times in each with
+[PresentMon](https://github.com/GameTechDev/PresentMon/releases), and compares
+average FPS, 1 % and 0.1 % lows, and frame-time percentiles (p50, p95, p99,
+p99.9). There is no window: sounds mark the start, every switch, problems and
+the end, and the tray tooltip shows the progress. A capture during which the
+game was not in front (Alt+Tab) is thrown away and repeated. "Stop benchmark"
+in the tray menu ends it early. The rule is put back the way it was in every
+case.
 
-It switches the game between the profiles (by default "Cache" and
-"Frequency"), captures the frame times in each with
-[PresentMon](https://github.com/GameTechDev/PresentMon/releases), and prints a
-comparison: average FPS, 1 % and 0.1 % lows, and frame-time percentiles (p50,
-p95, p99, p99.9), with the difference against the first profile. A sound marks
-the start, every switch and the end, so you can stay in the game. The rule is
-put back the way it was afterwards.
+The result comes as a notification and a dialog with a verdict:
+
+- **a clear winner** when one profile was fastest in every round and by more
+  than the rounds of one profile varied (at least 2 %). The dialog offers to
+  make it the rule.
+- **no clear winner** otherwise, with the reason (the rounds disagree, or the
+  difference is within the noise).
+- **GPU-bound** when the graphics card was busy for 90 % or more of every
+  frame in every profile: then the CPU waits for the GPU and its placement
+  cannot show. Lower the resolution or render scale and run it again.
+
+"Open last benchmark report" in the tray menu shows the full report.
+
+From a console, `Pinfold.exe benchmark game.exe` does the same and prints the
+report; progress shows in the window title, Ctrl+C cancels, and a clear winner
+is offered as the new rule (`--apply` takes it without asking).
 
 ```
 metric               Cache  Frequency  vs Cache
@@ -103,8 +122,9 @@ from the tray menu of an elevated Pinfold (see above) there is no extra prompt.
 
 Options: `--profiles "Cache,Frequency,All cores"`, `--seconds 60` per capture,
 `--rounds 2` (the order is reversed every second round so that neither profile
-always goes first), `--settle 5` seconds after each switch, `--countdown 10`
-before the start. Captures and the report are kept under
+always goes first), `--settle 5` seconds after each switch, `--countdown 3`
+after the game came to the front, `--ignore-focus` to capture whether or not
+the program is in front (for programs without a window). Captures and the report are kept under
 `%AppData%\Pinfold\benchmarks`.
 
 For a result you can trust:
