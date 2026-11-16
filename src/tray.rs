@@ -339,7 +339,7 @@ unsafe fn handle(hwnd: HWND, action: Action) {
 
 unsafe fn add_program(hwnd: HWND) {
     let mut file = [0u16; 1024];
-    let filter: Vec<u16> = "Programs (*.exe)\0*.exe\0\0".encode_utf16().collect();
+    let filter: Vec<u16> = "Programs and shortcuts\0*.exe;*.lnk\0\0".encode_utf16().collect();
     let title = wide("Add program to Pinfold");
     let mut ofn: OPENFILENAMEW = std::mem::zeroed();
     ofn.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;

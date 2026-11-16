@@ -11,6 +11,7 @@ mod config;
 mod diag;
 mod engine;
 mod log;
+mod shortcut;
 mod sys;
 mod topology;
 mod tray;
@@ -23,13 +24,13 @@ const USAGE: &str = "\
 Pinfold - persistent per-process CPU affinity
 
   Pinfold.exe                      run in the background with a tray icon
-  Pinfold.exe add <exe> [--profile <name>] [--mode affinity|cpusets|both] [--full-path]
+  Pinfold.exe add <exe|lnk> [--profile <name>] [--mode affinity|cpusets|both] [--full-path]
                                    create or update a rule (default profile: Cache)
   Pinfold.exe remove <exe>         remove a rule
   Pinfold.exe list                 show profiles and rules
   Pinfold.exe topology             show CPU topology and environment
   Pinfold.exe run                  run the engine in this console, no tray
-  Pinfold.exe <path-to-exe>        pick a profile for the program (drag and drop)
+  Pinfold.exe <exe-or-shortcut>    pick a profile for the program (drag and drop)
 
 Rules match by file name unless --full-path is given.
 Config: %AppData%\\Pinfold\\config.json";
@@ -139,10 +140,14 @@ fn cmd_add(args: &[String]) -> i32 {
         say(USAGE);
         return 2;
     };
-    if !path.to_lowercase().ends_with(".exe") {
-        say("only .exe paths or names are supported here");
-        return 2;
-    }
+    // A shortcut is resolved to the program it starts.
+    let path = match shortcut::program_for(&path) {
+        Ok(p) => p,
+        Err(e) => {
+            say(&e);
+            return 2;
+        }
+    };
     let Some(mut cfg) = load_config(false) else {
         return 1;
     };
@@ -224,30 +229,17 @@ fn cmd_topology() -> i32 {
 /// Started with a single path: something was dropped onto the executable.
 /// Show a profile picker at the mouse position, write the rule, exit.
 fn cmd_drop(path: &str) -> i32 {
-    let lower = path.to_lowercase();
-    if lower.ends_with(".url") {
-        message_box(
-            "This shortcut does not point at an executable (for example a Steam or Store link), \
-             so Pinfold cannot tell which program it starts.\n\n\
-             Start the program once and assign it from the tray menu under Assign.",
-        );
-        return 1;
-    }
-    if lower.ends_with(".lnk") {
-        message_box(
-            "Shortcuts are not supported yet in this build.\n\n\
-             Drop the .exe itself, or start the program and assign it from the tray menu.",
-        );
-        return 1;
-    }
-    if !lower.ends_with(".exe") {
-        message_box(&format!("Not an executable:\n{path}\n\n{USAGE}"));
-        return 2;
-    }
+    let path = match shortcut::program_for(path) {
+        Ok(p) => p,
+        Err(e) => {
+            message_box(&e);
+            return 2;
+        }
+    };
     let Some(mut cfg) = load_config(true) else {
         return 1;
     };
-    let name = file_name(path).to_string();
+    let name = file_name(&path).to_string();
     let profiles: Vec<String> = cfg.profiles.iter().map(|p| p.name.clone()).collect();
     let picked = unsafe {
         let hwnd = tray::hidden_window();

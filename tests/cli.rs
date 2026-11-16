@@ -12,7 +12,7 @@ fn stdout(out: &std::process::Output) -> String {
 fn help_prints_usage() {
     let s = Sandbox::new();
     let text = s.ok(&["help"]);
-    assert!(text.contains("Pinfold.exe add <exe>"), "{text}");
+    assert!(text.contains("Pinfold.exe add <exe|lnk>"), "{text}");
     assert!(!s.config_path().exists(), "help must not create a config");
 }
 
@@ -140,4 +140,94 @@ fn config_with_utf8_bom_is_accepted() {
     let with_bom = format!("\u{feff}{}", s.config());
     std::fs::write(s.config_path(), with_bom).unwrap();
     assert!(s.ok(&["list"]).contains("One"));
+}
+
+// --- shortcuts ---------------------------------------------------------------
+
+/// Create a real .lnk through the Windows Script Host, like Explorer does.
+fn make_shortcut(lnk: &std::path::Path, target: &std::path::Path) {
+    let script = format!(
+        "$s = (New-Object -ComObject WScript.Shell).CreateShortcut('{}'); \
+         $s.TargetPath = '{}'; $s.Save()",
+        lnk.display(),
+        target.display()
+    );
+    let status = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .status()
+        .expect("cannot run powershell");
+    assert!(status.success() && lnk.exists(), "shortcut was not created");
+}
+
+#[test]
+fn shortcut_to_a_program_adds_a_rule_for_its_target() {
+    let s = Sandbox::new();
+    s.write_config("");
+    let target = s.dir.join("Some Game.exe");
+    std::fs::copy(common::EXE, &target).unwrap();
+    let lnk = s.dir.join("Play Some Game.lnk");
+    make_shortcut(&lnk, &target);
+
+    let text = s.ok(&["add", lnk.to_str().unwrap(), "--profile", "One"]);
+    assert!(text.contains("added rule: Some Game.exe -> One"), "{text}");
+    let cfg: serde_json::Value = serde_json::from_str(&s.config()).unwrap();
+    assert_eq!(cfg["rules"][0]["match"], "Some Game.exe");
+}
+
+#[test]
+fn shortcut_with_full_path_stores_the_target_path() {
+    let s = Sandbox::new();
+    s.write_config("");
+    let target = s.dir.join("tool.exe");
+    std::fs::copy(common::EXE, &target).unwrap();
+    let lnk = s.dir.join("tool.lnk");
+    make_shortcut(&lnk, &target);
+
+    s.ok(&["add", lnk.to_str().unwrap(), "--profile", "One", "--full-path"]);
+    let cfg: serde_json::Value = serde_json::from_str(&s.config()).unwrap();
+    let stored = cfg["rules"][0]["match"].as_str().unwrap().to_lowercase();
+    assert_eq!(stored, target.to_string_lossy().to_lowercase());
+}
+
+#[test]
+fn shortcut_to_a_document_is_rejected() {
+    let s = Sandbox::new();
+    s.write_config("");
+    let doc = s.dir.join("notes.txt");
+    std::fs::write(&doc, "hello").unwrap();
+    let lnk = s.dir.join("notes.lnk");
+    make_shortcut(&lnk, &doc);
+
+    let before = s.config();
+    let out = s.run(&["add", lnk.to_str().unwrap(), "--profile", "One"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(stdout(&out).contains("not a program"), "{}", stdout(&out));
+    assert_eq!(s.config(), before);
+}
+
+#[test]
+fn url_shortcut_gets_the_explanation_and_no_rule() {
+    let s = Sandbox::new();
+    s.write_config("");
+    let url = s.dir.join("Some Game.url");
+    std::fs::write(&url, "[InternetShortcut]\r\nURL=steam://rungameid/12345\r\n").unwrap();
+
+    let before = s.config();
+    let out = s.run(&["add", url.to_str().unwrap(), "--profile", "One"]);
+    assert_eq!(out.status.code(), Some(2));
+    let text = stdout(&out);
+    assert!(text.contains("does not point at an executable"), "{text}");
+    assert!(text.contains("assign it from the tray menu"), "{text}");
+    assert_eq!(s.config(), before);
+}
+
+#[test]
+fn garbage_lnk_file_is_reported_not_crashed_on() {
+    let s = Sandbox::new();
+    s.write_config("");
+    let lnk = s.dir.join("broken.lnk");
+    std::fs::write(&lnk, "this is not a shortcut").unwrap();
+    let out = s.run(&["add", lnk.to_str().unwrap(), "--profile", "One"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(stdout(&out).contains("Cannot read the shortcut"), "{}", stdout(&out));
 }
