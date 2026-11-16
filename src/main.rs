@@ -35,9 +35,10 @@ Pinfold - persistent per-process CPU affinity
   Pinfold.exe run                  run the engine in this console, no tray
   Pinfold.exe autostart [on|off]   show or change starting with Windows
   Pinfold.exe quit                 stop the background instance
-  Pinfold.exe benchmark <exe> [--profiles A,B] [--seconds 60] [--rounds 2]
+  Pinfold.exe benchmark <exe> [--profiles A,B] [--seconds 60] [--rounds 2] [--apply]
                                    compare frame times of a running game between
-                                   profiles (needs PresentMon and admin rights)
+                                   profiles (needs PresentMon and admin rights);
+                                   --apply makes a clear winner the rule
   Pinfold.exe <exe-or-shortcut>    pick a profile for the program (drag and drop)
 
 Rules match by file name unless --full-path is given.
@@ -282,9 +283,10 @@ fn cmd_benchmark(args: &[String]) -> i32 {
         }
     };
     let code = match bench::run(&opts) {
-        Ok(report) => {
+        Ok(outcome) => {
             say("");
-            say(&report);
+            say(&outcome.report);
+            offer_winner(&opts, &outcome);
             0
         }
         Err(bench::Failure::NeedsElevation) => {
@@ -317,6 +319,32 @@ fn cmd_benchmark(args: &[String]) -> i32 {
         win::wait_for_enter();
     }
     code
+}
+
+/// After a clear result: make the winner the rule, if the user agrees.
+fn offer_winner(opts: &bench::Options, outcome: &bench::Outcome) {
+    let target = &opts.target;
+    let Some(winner) = outcome.better_profile() else {
+        if let Some(w) = &outcome.verdict.winner {
+            say(&format!("{target} already uses {w}: nothing to change."));
+        }
+        return;
+    };
+    let yes = opts.apply || {
+        say(&format!("Make {winner} the rule for {target}? [Y/n]"));
+        let mut line = String::new();
+        // No answer at all (no console, end of input) is a no.
+        matches!(std::io::stdin().read_line(&mut line), Ok(n) if n > 0)
+            && matches!(line.trim().to_lowercase().as_str(), "" | "y" | "yes")
+    };
+    if !yes {
+        say("The rule is unchanged.");
+        return;
+    }
+    match bench::apply(target, winner) {
+        Ok(()) => say(&format!("{target} now uses {winner}.")),
+        Err(e) => say(&format!("Could not change the rule: {e}")),
+    }
 }
 
 fn cmd_quit() -> i32 {

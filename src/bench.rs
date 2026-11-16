@@ -34,6 +34,8 @@ pub struct Options {
     pub settle: u32,
     pub countdown: u32,
     pub presentmon: Option<String>,
+    /// Make the winner the rule without asking.
+    pub apply: bool,
     /// Started from the tray menu: own console window, wait before closing.
     pub window: bool,
 }
@@ -56,6 +58,9 @@ impl Options {
         if let Some(p) = &self.presentmon {
             a.extend(["--presentmon".to_string(), p.clone()]);
         }
+        if self.apply {
+            a.push("--apply".to_string());
+        }
         if self.window {
             a.push("--window".to_string());
         }
@@ -72,6 +77,7 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
         settle: 5,
         countdown: 10,
         presentmon: None,
+        apply: false,
         window: false,
     };
     let number = |flag: &str, v: Option<&String>, min: u32, max: u32| -> Result<u32, String> {
@@ -97,6 +103,7 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
             "--presentmon" => {
                 o.presentmon = Some(it.next().ok_or("--presentmon needs a path")?.clone())
             }
+            "--apply" => o.apply = true,
             "--window" => o.window = true,
             _ if a.starts_with("--") => return Err(format!("unknown option {a}")),
             _ if o.target.is_empty() => o.target = file_name(a).to_string(),
@@ -376,7 +383,7 @@ fn restore(dir: &Path, target: &str, original: Option<Rule>, reset: Option<u64>)
     }
 }
 
-pub fn run(opts: &Options) -> Result<String, Failure> {
+pub fn run(opts: &Options) -> Result<Outcome, Failure> {
     let dir = config::dir();
     let cfg = config::load(&dir)?;
     let topo = topology::read();
@@ -445,6 +452,7 @@ pub fn run(opts: &Options) -> Result<String, Failure> {
     let mut frames: Vec<(String, Vec<f64>)> =
         profiles.iter().map(|p| (p.clone(), Vec::new())).collect();
     let mut rounds_text = String::new();
+    let mut per_round: Vec<(u32, String, f64)> = Vec::new();
     let mut outcome = Ok(());
     for (round, profile) in &plan {
         beep();
@@ -462,6 +470,7 @@ pub fn run(opts: &Options) -> Result<String, Failure> {
             say(&line);
             rounds_text.push_str(&line);
             rounds_text.push('\n');
+            per_round.push((*round, profile.clone(), s.avg_fps));
             if let Some((_, all)) = frames.iter_mut().find(|(p, _)| p == profile) {
                 all.extend(times);
             }
@@ -472,6 +481,7 @@ pub fn run(opts: &Options) -> Result<String, Failure> {
             break;
         }
     }
+    let current = original.as_ref().map(|r| r.profile.clone());
     let reset = (!background && original.is_none()).then_some(run.topo.all_mask);
     restore(&dir, &opts.target, original, reset);
     beep();
@@ -481,9 +491,12 @@ pub fn run(opts: &Options) -> Result<String, Failure> {
         .iter()
         .filter_map(|(p, times)| frametime::stats(times).map(|s| (p.clone(), s)))
         .collect();
+    let overall: Vec<(String, f64)> = columns.iter().map(|(p, s)| (p.clone(), s.avg_fps)).collect();
+    let verdict = frametime::verdict(&overall, &per_round);
     let mut text = format!(
-        "Pinfold benchmark of {}\n{} rounds, {} s per capture, all rounds of a profile combined.\n\n",
-        opts.target, opts.rounds, opts.seconds
+        "Pinfold benchmark of {}\n{} rounds, {} s per capture, all rounds of a profile combined.\n\n\
+         Verdict: {}\n\n",
+        opts.target, opts.rounds, opts.seconds, verdict.text
     );
     text.push_str(&frametime::report(&columns));
     text.push_str(
@@ -494,7 +507,35 @@ pub fn run(opts: &Options) -> Result<String, Failure> {
     let report_path = run.out_dir.join("report.txt");
     let _ = std::fs::write(&report_path, &text);
     text.push_str(&format!("\nCaptures and this report: {}\n", run.out_dir.display()));
-    Ok(text)
+    Ok(Outcome { report: text, verdict, current })
+}
+
+/// A finished benchmark.
+pub struct Outcome {
+    /// The full report, as printed and saved.
+    pub report: String,
+    pub verdict: frametime::Verdict,
+    /// The profile the rule had before the benchmark, if there was a rule.
+    pub current: Option<String>,
+}
+
+impl Outcome {
+    /// The winner, when it is not already the rule's profile.
+    pub fn better_profile(&self) -> Option<&str> {
+        let w = self.verdict.winner.as_deref()?;
+        match &self.current {
+            Some(c) if c.eq_ignore_ascii_case(w) => None,
+            _ => Some(w),
+        }
+    }
+}
+
+/// Make `profile` the rule for `target` (the benchmark's result).
+pub fn apply(target: &str, profile: &str) -> Result<(), String> {
+    let dir = config::dir();
+    let mut cfg = config::load(&dir)?;
+    cfg.upsert_rule(target, profile, None);
+    config::save(&dir, &cfg).map_err(|e| format!("cannot write config: {e}"))
 }
 
 #[cfg(test)]

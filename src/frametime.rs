@@ -214,9 +214,171 @@ pub fn report(columns: &[(String, Stats)]) -> String {
     out
 }
 
+/// What a benchmark says, in one or two sentences.
+#[derive(Debug, PartialEq)]
+pub struct Verdict {
+    /// The profile that is faster beyond doubt, if there is one.
+    pub winner: Option<String>,
+    pub text: String,
+}
+
+/// Decide from average FPS: `overall` per profile (all rounds combined)
+/// and `rounds` as (round, profile, avg FPS) per capture.
+///
+/// A profile wins when it is ahead of every other one in every round, and
+/// its lead is larger than the spread between rounds of the same profile
+/// (at least 2 %). With a single round the spread is unknown; 3 % is
+/// required then.
+pub fn verdict(overall: &[(String, f64)], rounds: &[(u32, String, f64)]) -> Verdict {
+    let mut ranked: Vec<&(String, f64)> = overall.iter().collect();
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let (Some((best, best_fps)), Some((second, second_fps))) = (ranked.first(), ranked.get(1))
+    else {
+        return Verdict { winner: None, text: "Nothing to compare.".into() };
+    };
+    let margin = 100.0 * (best_fps - second_fps) / second_fps;
+
+    let mut ids: Vec<u32> = rounds.iter().map(|r| r.0).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let fps = |round: u32, profile: &str| {
+        rounds.iter().find(|r| r.0 == round && r.1 == profile).map(|r| r.2)
+    };
+    let won = ids
+        .iter()
+        .filter(|&&r| {
+            let Some(b) = fps(r, best) else { return false };
+            overall.iter().filter(|(p, _)| p != best).all(|(p, _)| fps(r, p).is_some_and(|o| b > o))
+        })
+        .count();
+    let n = ids.len();
+
+    // Largest spread between the rounds of one profile, in percent.
+    let spread = (n >= 2).then(|| {
+        overall
+            .iter()
+            .map(|(p, _)| {
+                let v: Vec<f64> = rounds.iter().filter(|r| &r.1 == p).map(|r| r.2).collect();
+                let max = v.iter().cloned().fold(f64::MIN, f64::max);
+                let min = v.iter().cloned().fold(f64::MAX, f64::min);
+                let mean = v.iter().sum::<f64>() / v.len().max(1) as f64;
+                if mean > 0.0 {
+                    100.0 * (max - min) / mean
+                } else {
+                    0.0
+                }
+            })
+            .fold(0.0, f64::max)
+    });
+    let threshold = spread.map_or(3.0, |s| s.max(2.0));
+    let versus =
+        if overall.len() > 2 { format!("the next best, {second}") } else { second.clone() };
+
+    if won < n {
+        return Verdict {
+            winner: None,
+            text: format!(
+                "No clear winner: {best} is {margin:.1}% ahead overall, but the rounds \
+                 disagree ({best} was fastest in {won} of {n})."
+            ),
+        };
+    }
+    if margin <= threshold {
+        let within = match spread {
+            Some(s) => format!("within the {s:.1}% the rounds of one profile varied by"),
+            None => "too little to tell from a single round".to_string(),
+        };
+        return Verdict {
+            winner: None,
+            text: format!(
+                "No clear winner: {best} is only {margin:.1}% ahead of {versus}, {within}."
+            ),
+        };
+    }
+    let certainty = match spread {
+        Some(s) => {
+            format!("The rounds of one profile varied by up to {s:.1}%, so this is a clear result.")
+        }
+        None => "Only one round was run: run two or more to see how much results vary.".into(),
+    };
+    Verdict {
+        winner: Some(best.clone()),
+        text: format!(
+            "{best} is {margin:.1}% faster than {versus} (average FPS) and was fastest in \
+             {won} of {n} rounds. {certainty}"
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn r(round: u32, profile: &str, fps: f64) -> (u32, String, f64) {
+        (round, profile.to_string(), fps)
+    }
+    fn o(profile: &str, fps: f64) -> (String, f64) {
+        (profile.to_string(), fps)
+    }
+
+    #[test]
+    fn a_consistent_lead_beyond_the_noise_wins() {
+        // The second Longshot run.
+        let rounds = [
+            r(1, "Cache", 72.7),
+            r(1, "Frequency", 67.0),
+            r(2, "Frequency", 66.2),
+            r(2, "Cache", 71.1),
+        ];
+        let v = verdict(&[o("Cache", 71.9), o("Frequency", 66.63)], &rounds);
+        assert_eq!(v.winner.as_deref(), Some("Cache"));
+        assert!(v.text.starts_with("Cache is 7.9% faster than Frequency"), "{}", v.text);
+        assert!(v.text.contains("2 of 2 rounds") && v.text.contains("2.2%"), "{}", v.text);
+    }
+
+    #[test]
+    fn rounds_that_disagree_are_inconclusive() {
+        let rounds = [
+            r(1, "Cache", 60.0),
+            r(1, "Frequency", 50.0),
+            r(2, "Frequency", 55.0),
+            r(2, "Cache", 52.0),
+        ];
+        let v = verdict(&[o("Cache", 56.0), o("Frequency", 52.5)], &rounds);
+        assert_eq!(v.winner, None);
+        assert!(v.text.contains("rounds disagree") && v.text.contains("1 of 2"), "{}", v.text);
+    }
+
+    #[test]
+    fn a_lead_smaller_than_the_spread_is_inconclusive() {
+        let rounds = [r(1, "A", 100.0), r(1, "B", 99.0), r(2, "B", 95.0), r(2, "A", 96.0)];
+        let v = verdict(&[o("A", 98.0), o("B", 97.0)], &rounds);
+        assert_eq!(v.winner, None);
+        assert!(v.text.contains("only 1.0% ahead of B"), "{}", v.text);
+    }
+
+    #[test]
+    fn small_but_steady_leads_still_need_two_percent() {
+        let rounds = [r(1, "A", 101.5), r(1, "B", 100.0), r(2, "B", 100.0), r(2, "A", 101.5)];
+        assert_eq!(verdict(&[o("A", 101.5), o("B", 100.0)], &rounds).winner, None);
+    }
+
+    #[test]
+    fn one_round_needs_three_percent_and_says_so() {
+        let v = verdict(&[o("A", 110.0), o("B", 100.0)], &[r(1, "A", 110.0), r(1, "B", 100.0)]);
+        assert_eq!(v.winner.as_deref(), Some("A"));
+        assert!(v.text.contains("Only one round"), "{}", v.text);
+        let v = verdict(&[o("A", 102.0), o("B", 100.0)], &[r(1, "A", 102.0), r(1, "B", 100.0)]);
+        assert_eq!(v.winner, None);
+    }
+
+    #[test]
+    fn three_profiles_compare_against_the_next_best() {
+        let rounds = [r(1, "A", 120.0), r(1, "B", 100.0), r(1, "C", 110.0)];
+        let v = verdict(&[o("A", 120.0), o("B", 100.0), o("C", 110.0)], &rounds);
+        assert_eq!(v.winner.as_deref(), Some("A"));
+        assert!(v.text.contains("than the next best, C"), "{}", v.text);
+    }
 
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-9

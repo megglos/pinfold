@@ -104,9 +104,38 @@ fn compares_profiles_and_leaves_no_trace_when_there_was_no_rule() {
         .count();
     assert_eq!(csvs, 4);
 
+    // A clear result, but nobody answered the question: nothing changes.
+    assert!(text.contains("Verdict: One is 100.0% faster than Wide"), "{text}");
+    assert!(text.contains("Make One the rule for") && text.contains("unchanged"), "{text}");
+
     // No rule existed before: none afterwards, and the program is unpinned.
     assert_eq!(rule_count(&s), 0);
     assert_eq!(p.affinity(), p.system_mask());
+}
+
+#[test]
+fn apply_makes_the_winner_the_rule() {
+    let s = Sandbox::new();
+    let target = s.target();
+    write_config(
+        &s,
+        &format!(r#"{{ "match": "{}", "profile": "Wide", "enforce": false }}"#, target.name),
+    );
+    let pm = fake_presentmon(&s, CAPTURING);
+    let p = target.start();
+    wait_for("target visible", TIMEOUT, || p.affinity() != 0);
+    if !multi_cpu(&p) {
+        return;
+    }
+    let mut args = vec!["benchmark", target.name.as_str(), "--presentmon", pm.to_str().unwrap()];
+    args.extend_from_slice(FAST);
+    args.push("--apply");
+    let text = s.ok(&args);
+    assert!(text.contains("now uses One"), "{text}");
+    let cfg: serde_json::Value = serde_json::from_str(&s.config()).unwrap();
+    assert_eq!(cfg["rules"][0]["profile"], "One");
+    // The rest of the rule is kept.
+    assert_eq!(cfg["rules"][0]["enforce"], false);
 }
 
 #[test]
@@ -146,6 +175,7 @@ fn existing_rule_is_restored_and_the_background_instance_does_the_switching() {
     };
     // Wide is the baseline here: 50 FPS, One is +100 %.
     assert!(line("avg FPS").contains("+100.0%"), "{text}");
+    assert!(text.contains("already uses One"), "{text}");
 
     let after: serde_json::Value = serde_json::from_str(&s.config()).unwrap();
     let original: serde_json::Value = serde_json::from_str(&before).unwrap();
