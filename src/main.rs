@@ -15,6 +15,7 @@ mod engine;
 mod frametime;
 mod log;
 mod shortcut;
+mod sound;
 mod sys;
 mod topology;
 mod tray;
@@ -39,6 +40,7 @@ Pinfold - persistent per-process CPU affinity
                                    compare frame times of a running game between
                                    profiles (needs PresentMon and admin rights);
                                    --apply makes a clear winner the rule
+  Pinfold.exe sounds               play the four benchmark sounds
   Pinfold.exe <exe-or-shortcut>    pick a profile for the program (drag and drop)
 
 Rules match by file name unless --full-path is given.
@@ -50,7 +52,7 @@ fn main() {
         None => tray::run(),
         Some(
             cmd @ ("run" | "add" | "remove" | "list" | "topology" | "autostart" | "quit"
-            | "benchmark" | "help" | "--help" | "-h" | "/?"),
+            | "benchmark" | "sounds" | "help" | "--help" | "-h" | "/?"),
         ) => {
             if args.iter().any(|a| a == "--window") {
                 win::console_window("Pinfold benchmark");
@@ -66,6 +68,7 @@ fn main() {
                 "autostart" => cmd_autostart(&args[1..]),
                 "quit" => cmd_quit(),
                 "benchmark" => cmd_benchmark(&args[1..]),
+                "sounds" => cmd_sounds(),
                 _ => {
                     say(USAGE);
                     0
@@ -271,6 +274,23 @@ fn cmd_autostart(args: &[String]) -> i32 {
 }
 
 /// Compare frame times of a running program between profiles.
+/// Play the benchmark sounds one after the other, with their meaning.
+fn cmd_sounds() -> i32 {
+    use bench::Sound;
+    for (sound, meaning) in [
+        (Sound::Start, "start: the first capture starts"),
+        (Sound::Switch, "switch: the next profile starts"),
+        (Sound::Problem, "problem: the game is not in front, or an error"),
+        (Sound::Done, "done: the result is ready"),
+    ] {
+        say(meaning);
+        bench::play(sound);
+        let rest = 800u64.saturating_sub(sound::length_ms(sound) as u64);
+        std::thread::sleep(std::time::Duration::from_millis(rest));
+    }
+    0
+}
+
 fn cmd_benchmark(args: &[String]) -> i32 {
     let opts = match bench::parse_args(args) {
         Ok(o) => o,

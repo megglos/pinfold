@@ -13,8 +13,6 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use windows_sys::Win32::System::Diagnostics::Debug::MessageBeep;
-
 use crate::config::{self, Config, Mode, Rule};
 use crate::engine::System;
 use crate::frametime::{self, Stats};
@@ -214,15 +212,7 @@ pub enum Sound {
 }
 
 pub fn play(sound: Sound) {
-    // MB_OK, MB_ICONEXCLAMATION, MB_ICONHAND, MB_ICONASTERISK: four sounds
-    // of the Windows sound scheme.
-    let kind = match sound {
-        Sound::Switch => 0,
-        Sound::Start => 0x30,
-        Sound::Problem => 0x10,
-        Sound::Done => 0x40,
-    };
-    unsafe { MessageBeep(kind) };
+    crate::sound::play(sound);
 }
 
 /// Why a capture stopped before PresentMon finished.

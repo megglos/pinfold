@@ -128,7 +128,8 @@ p99.9).
 
 The benchmark has no window:
 
-- Sounds tell you about the start, each switch, problems and the end.
+- Sounds tell you about the start, each switch, problems and the end. To
+  hear them, run `Pinfold.exe sounds`.
 - The tray icon becomes a ring that fills. The tooltip shows the step.
 - If the game is not in front (Alt+Tab), Pinfold discards that capture and
   does it again.
@@ -169,7 +170,9 @@ frame time p99 ms    10.12      12.05    +19.1%
 
 (example numbers)
 
-Setup: get the PresentMon console application. Put the `.exe` next to
+Setup: get the
+[PresentMon](https://github.com/GameTechDev/PresentMon/releases) console
+application. Put the `.exe` next to
 `Pinfold.exe`, or set `"presentMon": "C:\\path\\PresentMon.exe"` in the
 config, or use `--presentmon <path>`. PresentMon needs administrator rights.
 An elevated Pinfold (see above) starts it without a prompt.

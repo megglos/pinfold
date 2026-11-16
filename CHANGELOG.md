@@ -3,6 +3,13 @@
 The release pipeline copies the section of a version into its release notes.
 Write the section before you push the tag.
 
+## Unreleased
+
+- **Own benchmark sounds.** Four short tones replace the Windows sounds:
+  two rising notes at the start, a soft blip at each switch, two falling
+  notes for a problem, and a rising chord at the end. To hear them, run
+  `Pinfold.exe sounds`.
+
 ## 1.0.0-beta1 - 2026-11-16
 
 The first public version. Pinfold keeps games and other programs on the CPU
@@ -23,7 +30,8 @@ CCD of a dual-CCD Ryzen X3D.
 - **Start with Windows, elevated.** A Task Scheduler logon task starts
   Pinfold with the highest rights, without a UAC prompt at logon. Thus
   Pinfold can also pin games that run elevated.
-- **Benchmark.** Compare profiles for a running game with PresentMon, from
+- **Benchmark.** Compare profiles for a running game with
+  [PresentMon](https://github.com/GameTechDev/PresentMon/releases), from
   the tray menu. Pinfold gives a verdict, tells you if the game is GPU-bound,
   and can make the winner the rule.
 - **Small.** Less than 3 MB of memory and less than 0.02 % CPU when idle. One
@@ -36,8 +44,9 @@ CCD of a dual-CCD Ryzen X3D.
 2. Start `Pinfold.exe`. The Pinfold icon comes into the tray.
 3. In the tray menu, select "Start with Windows". You get one UAC prompt.
 
-For the benchmark, put the PresentMon console application next to
-`Pinfold.exe`.
+For the benchmark, download the
+[PresentMon](https://github.com/GameTechDev/PresentMon/releases) console
+application and put it next to `Pinfold.exe`.
 
 ### Known limits
 
