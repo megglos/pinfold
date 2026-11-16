@@ -3,12 +3,25 @@
 The release pipeline copies the section of a version into its release notes.
 Write the section before you push the tag.
 
-## Unreleased
+## 1.0.0-beta2 - 2026-11-16
 
 - **Own benchmark sounds.** Four short tones replace the Windows sounds:
   two rising notes at the start, a soft blip at each switch, two falling
   notes for a problem, and a rising chord at the end. To hear them, run
   `Pinfold.exe sounds`.
+
+### Install
+
+Update from 1.0.0-beta1:
+
+1. Download `Pinfold-1.0.0-beta2-x64.zip`.
+2. In the tray menu, select "Exit".
+3. Replace `Pinfold.exe` with the new file.
+4. Start `Pinfold.exe`.
+
+For a new install, see the [README](https://github.com/megglos/pinfold#install).
+For the benchmark, you need
+[PresentMon](https://github.com/GameTechDev/PresentMon/releases).
 
 ## 1.0.0-beta1 - 2026-11-16
 

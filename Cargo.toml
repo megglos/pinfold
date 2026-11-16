@@ -1,6 +1,6 @@
 [package]
 name = "pinfold"
-version = "1.0.0-beta1"
+version = "1.0.0-beta2"
 edition = "2021"
 description = "Persistent per-process CPU affinity for Windows"
 license = "MIT"
