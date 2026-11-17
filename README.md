@@ -6,6 +6,33 @@ dual-CCD Ryzen X3D.
 
 A pinfold is a pen for stray animals. This one keeps stray processes.
 
+## Why, if AMD already does this?
+
+On a dual-CCD X3D such as the Ryzen 9 9950X3D, one CCD has the 3D V-Cache
+(good for most games) and one CCD has the higher clock. AMD's automatic
+solution puts games on the cache CCD: the PPM Provisioning driver, the 3D
+V-Cache Performance Optimizer, Windows Game Mode, game recognition in the
+Xbox Game Bar and AMD's application database. It works well for many games.
+
+But it is automatic, and it can fail:
+
+- The Game Bar does not recognize the game, or classifies it incorrectly.
+- AMD's database does not include the game.
+- A Windows or chipset driver update changes the behaviour.
+- Some games run better on the frequency CCD. You cannot select that.
+- You cannot easily see which CCD a game uses.
+
+AMD's drivers set a *preference* for a CCD (they park the cores of the
+other CCD). They do not make sure that all threads of a game stay on the
+cache CCD. Pinfold sets the affinity mask or the CPU Sets of a game through
+the Windows API. This is an explicit rule for each game, and Pinfold keeps
+it when other software changes it. The benchmark shows which CCD is faster
+for your game.
+
+Pinfold does not replace AMD's drivers and does not change their settings.
+Keep them installed. Use Pinfold for the games where the automatic solution
+is not sufficient.
+
 ![The Pinfold tray menu with the Benchmark submenu open for longshot.exe](docs/images/tray-menu.png)
 
 The specification is in [docs/SPEC.md](docs/SPEC.md). It uses the old name
